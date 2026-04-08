@@ -1,0 +1,5 @@
+# HTML references /delphi/assets/* but Vite emits files at /assets/* in dist — map for Cloudflare Pages.
+/delphi/assets/* /assets/:splat 200
+/delphi /index.html 200
+/delphi/ /index.html 200
+/* /index.html 200

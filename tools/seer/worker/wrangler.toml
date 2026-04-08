@@ -1,0 +1,9 @@
+name = "seer-worker"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "seer-db"
+database_id = "0b72daa3-6fd6-40c6-8106-925bb2cd1493"
+migrations_dir = "../migrations"

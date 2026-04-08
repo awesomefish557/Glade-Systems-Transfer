@@ -1,0 +1,22 @@
+name = "glade-router"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+workers_dev = true
+
+# Public base URL for the Node convertor (no trailing slash). Must be reachable from Cloudflare’s edge
+# (not 127.0.0.1). Mirrors cosmo.gladesystems.uk — change if you host elsewhere or use HTTPS on 443.
+[vars]
+CONVERTOR_ORIGIN = "http://convertor.gladesystems.uk:3847"
+# Site-wide password gate for gladesystems.uk (and workers.dev). Remove or empty to disable. For production, prefer Workers → Secrets → GLADE_GATE_PASSWORD instead of committing.
+GLADE_GATE_PASSWORD = "mU5/6yU"
+# Delphi: Scenario Explorer static build on Pages (Delphi/scenario-explorer → delphi-ui project). Default upstream production.delphi-ui.pages.dev. Override for custom domain:
+# DELPHI_ORIGIN = "https://delphi.gladesystems.uk"
+# Seer: /seer redirects to SEER_PAGES_ORIGIN or https://master.seer-11i.pages.dev (set in Dashboard if needed).
+# Optional vanity: attach seer.gladesystems.uk on the Seer Pages project, then set SEER_PAGES_ORIGIN=https://seer.gladesystems.uk
+
+# Local dev: router/.dev.vars overrides [vars] for `wrangler dev` (see .dev.vars.example).
+# You can also set or override CONVERTOR_ORIGIN in the dashboard: Workers → glade-router → Settings → Variables.
+
+routes = [
+  { pattern = "gladesystems.uk/*", zone_name = "gladesystems.uk" }
+]

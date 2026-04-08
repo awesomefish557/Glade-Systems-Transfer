@@ -1,0 +1,4 @@
+/delphi/assets/* /assets/:splat 200
+/delphi /index.html 200
+/delphi/ /index.html 200
+/* /index.html 200

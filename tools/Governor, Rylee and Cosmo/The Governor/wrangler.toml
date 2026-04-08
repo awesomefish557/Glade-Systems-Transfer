@@ -1,0 +1,8 @@
+name = "the-governor"
+main = "governor/review.ts"
+compatibility_date = "2026-01-25"
+
+[[d1_databases]]
+binding = "governor_db"
+database_name = "governor_core"
+database_id = "35609246-596a-4a19-b3e4-d624dc0092a1"

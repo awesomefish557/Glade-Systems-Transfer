@@ -1,0 +1,31 @@
+name = "pinboard-api"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+workers_dev = true
+
+# CORS: Worker sets Access-Control-Allow-Origin: * (see src/index.ts).
+# Typical clients: https://pinboard-ui.pages.dev, https://pinboard-ui-<hash>.pages.dev, https://gladesystems.uk
+[vars]
+ENVIRONMENT = "production"
+ALLOWED_ORIGINS = "https://pinboard-ui.pages.dev,https://gladesystems.uk"
+# Required for R2 presigned PUT URLs (S3-compatible API). Create at R2 → Manage R2 API Tokens.
+R2_ACCOUNT_ID = ""
+# Public bucket name (must match S3 API bucket name for signing).
+R2_BUCKET_NAME = "pinboard-files"
+
+[[d1_databases]]
+binding = "PINBOARD_DB"
+database_name = "pinboard-db"
+# Replace after: wrangler d1 create pinboard-db
+database_id = "12cc969f-29bb-483f-8418-c5e3fd9d804e"
+# Explicit path so Wrangler always picks up SQL files (esp. monorepos / odd cwd).
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "PINBOARD_R2"
+bucket_name = "pinboard-files"
+
+# Secrets (set via dashboard or `wrangler secret put <NAME>`):
+#   ANTHROPIC_API_KEY
+#   R2_ACCESS_KEY_ID   — R2 S3 API token access key (for presigned URLs)
+#   R2_SECRET_ACCESS_KEY

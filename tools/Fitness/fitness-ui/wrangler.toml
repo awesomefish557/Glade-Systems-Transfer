@@ -1,0 +1,4 @@
+# Cloudflare Pages — deploy: npm run build && npx wrangler pages deploy dist --project-name fitness-ui
+name = "fitness-ui"
+compatibility_date = "2024-01-01"
+pages_build_output_dir = "dist"

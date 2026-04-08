@@ -1,0 +1,130 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+}
+
+#root {
+  background: transparent !important;
+}
+
+body {
+  background: #050d06;
+  color: #dff0d8;
+  font-family: Georgia, 'Times New Roman', serif;
+  -webkit-font-smoothing: antialiased;
+  line-height: 1.5;
+}
+
+.night-sky-canvas.night-sky-canvas--fixed {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 0;
+  pointer-events: none;
+  display: block;
+}
+
+.delphi-shell {
+  position: relative;
+  z-index: 10;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 16px 16px 24px;
+}
+
+.delphi-messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 8px 0 16px;
+}
+
+.delphi-input-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.delphi-textarea {
+  flex: 1;
+  padding: 10px 12px;
+  border: none;
+  border-radius: 0;
+  background: rgba(5, 12, 6, 0.75);
+  color: #aed4b8;
+  font-family: Georgia, serif;
+  font-style: italic;
+  font-size: 14px;
+  resize: none;
+  min-height: 48px;
+}
+
+.delphi-textarea::placeholder {
+  color: #2d4a35;
+}
+
+.delphi-textarea:focus {
+  outline: 1px solid rgba(109, 212, 160, 0.32);
+  outline-offset: 0;
+}
+
+.delphi-btn {
+  padding: 10px 16px;
+  font-size: 12px;
+  font-family: Georgia, serif;
+  cursor: pointer;
+  border: none;
+  border-radius: 0;
+  background: rgba(61, 130, 98, 0.55);
+  color: #dff0d8;
+}
+
+.delphi-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.delphi-btn--ghost {
+  background: transparent;
+  color: #5a9e6f;
+}
+
+.delphi-section-body {
+  font-size: 13px;
+  line-height: 1.55;
+  color: #9abfa0;
+  white-space: pre-wrap;
+  font-family: Georgia, serif;
+  font-style: italic;
+}
+
+.delphi-user-bubble {
+  font-size: 13px;
+  line-height: 1.5;
+  color: #aed4b8;
+  font-style: italic;
+}
+
+.journal-vignette-delphi {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, transparent 40%, rgba(2, 6, 3, 0.65) 100%);
+}

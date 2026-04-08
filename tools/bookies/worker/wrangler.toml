@@ -1,0 +1,9 @@
+name = "bookies"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "bookies-db"
+database_id = "02df6b8d-54b8-4884-9367-adb9d555d604"
+migrations_dir = "migrations"

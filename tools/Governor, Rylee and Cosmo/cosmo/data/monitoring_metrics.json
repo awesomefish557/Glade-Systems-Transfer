@@ -1,0 +1,14 @@
+[
+  {
+    "date": "2026-03-25",
+    "timestamp": "2026-03-25T19:19:22.830907+00:00",
+    "portfolio_value": 8000.0,
+    "gain_loss": 0.0,
+    "pct_return": 0.0,
+    "bss": 66.25,
+    "holdings_count": 7,
+    "benchmark_pct_return": 0.0,
+    "excess_vs_ftse_pct": 0.0,
+    "vix": 25.8799991607666
+  }
+]

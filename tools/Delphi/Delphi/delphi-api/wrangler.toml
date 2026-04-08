@@ -1,0 +1,12 @@
+name = "delphi-api"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+workers_dev = true
+
+[vars]
+APP_PASSCODE = "your-passcode"
+
+[[d1_databases]]
+binding = "delphi_db"
+database_name = "delphi_core"
+database_id = "a36c2d43-7cfa-4d58-90c6-6b791f5f394f"

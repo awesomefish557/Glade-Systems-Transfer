@@ -1,0 +1,115 @@
+{
+  "cash": 4640.0,
+  "holdings": {
+    "3IN.L": {
+      "quantity": 1.42433234421365,
+      "entry_price": 337.0,
+      "entry_date": "2026-03-25"
+    },
+    "ABF.L": {
+      "quantity": 0.2613667301933025,
+      "entry_price": 1836.5,
+      "entry_date": "2026-03-25"
+    },
+    "ADM.L": {
+      "quantity": 0.15257469802924348,
+      "entry_price": 3146.0,
+      "entry_date": "2026-03-25"
+    },
+    "AJB.L": {
+      "quantity": 1.0353753099235776,
+      "entry_price": 463.6000061035156,
+      "entry_date": "2026-03-25"
+    },
+    "AUTO.L": {
+      "quantity": 1.0204081765052662,
+      "entry_price": 470.3999938964844,
+      "entry_date": "2026-03-25"
+    },
+    "BAB.L": {
+      "quantity": 0.38247011952191234,
+      "entry_price": 1255.0,
+      "entry_date": "2026-03-25"
+    },
+    "BARC.L": {
+      "quantity": 1.2176559744699023,
+      "entry_price": 394.20001220703125,
+      "entry_date": "2026-03-25"
+    }
+  },
+  "trades": [
+    {
+      "symbol": "3IN.L",
+      "action": "BUY",
+      "price": 337.0,
+      "quantity": 1.42433234421365,
+      "notional": 480.00000000000006,
+      "date": "2026-03-25T19:18:08.447170+00:00",
+      "reason": "Paper: Value Bee BUY"
+    },
+    {
+      "symbol": "ABF.L",
+      "action": "BUY",
+      "price": 1836.5,
+      "quantity": 0.2613667301933025,
+      "notional": 480.0,
+      "date": "2026-03-25T19:18:12.053276+00:00",
+      "reason": "Paper: Value Bee BUY"
+    },
+    {
+      "symbol": "ADM.L",
+      "action": "BUY",
+      "price": 3146.0,
+      "quantity": 0.15257469802924348,
+      "notional": 480.0,
+      "date": "2026-03-25T19:18:13.215965+00:00",
+      "reason": "Paper: Value Bee BUY"
+    },
+    {
+      "symbol": "AJB.L",
+      "action": "BUY",
+      "price": 463.6000061035156,
+      "quantity": 1.0353753099235776,
+      "notional": 479.99999999999994,
+      "date": "2026-03-25T19:18:19.358909+00:00",
+      "reason": "Paper: Value Bee BUY"
+    },
+    {
+      "symbol": "AUTO.L",
+      "action": "BUY",
+      "price": 470.3999938964844,
+      "quantity": 1.0204081765052662,
+      "notional": 479.99999999999994,
+      "date": "2026-03-25T19:18:26.050627+00:00",
+      "reason": "Paper: Value Bee BUY"
+    },
+    {
+      "symbol": "BAB.L",
+      "action": "BUY",
+      "price": 1255.0,
+      "quantity": 0.38247011952191234,
+      "notional": 480.0,
+      "date": "2026-03-25T19:19:18.154499+00:00",
+      "reason": "Paper: Value Bee BUY"
+    },
+    {
+      "symbol": "BARC.L",
+      "action": "BUY",
+      "price": 394.20001220703125,
+      "quantity": 1.2176559744699023,
+      "notional": 480.0,
+      "date": "2026-03-25T19:19:19.370761+00:00",
+      "reason": "Paper: Value Bee BUY"
+    }
+  ],
+  "equity_history": [
+    {
+      "date": "2026-03-25",
+      "value": 8000.0,
+      "benchmark_close": 10106.83984375
+    }
+  ],
+  "benchmark_start": 10106.83984375,
+  "paper_started": "2026-03-25",
+  "last_updated": "2026-03-25T19:19:22.830024+00:00"
+}

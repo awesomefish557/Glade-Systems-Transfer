@@ -2,7 +2,15 @@ import { haversineM, offsetLatMeters, offsetLngMeters } from './geoHelpers'
 
 export async function fetchJsonSafe<T>(url: string, init?: RequestInit): Promise<T | null> {
   try {
-    const res = await fetch(url, init)
+    const run = async () => {
+      const res = await fetch(url, init)
+      if (res.status === 429 && url.includes('overpass-api.de')) {
+        await new Promise((resolve) => setTimeout(resolve, 15_000))
+        return fetch(url, init)
+      }
+      return res
+    }
+    const res = await run()
     if (!res.ok) return null
     return (await res.json()) as T
   } catch {

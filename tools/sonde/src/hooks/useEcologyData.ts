@@ -16,15 +16,15 @@ export type EcologyFetchState = GenericState<EcologyData>
 export function useEcologyData(site: SiteLocation | null): EcologyFetchState {
   const [state, setState] = useState<EcologyFetchState>({ status: 'idle' })
   useEffect(() => {
-    if (!site) return void setState({ status: 'idle' })
+    if (!site || (site.lat === 0 && site.lng === 0)) return void setState({ status: 'idle' })
     const key = cacheKey('ecology', [site.lat.toFixed(4), site.lng.toFixed(4)])
     const cached = cacheGet<EcologyData>(key)
     if (cached) return void setState({ status: 'ok', data: cached })
     let cancelled = false
     setState({ status: 'loading' })
     ;(async () => {
-      const aqUrl = 'https://api.erg.ic.ac.uk/AirQuality/Annual/MonitoringNetwork/GroupName=AURN/json'
-      const aq = await fetchJsonSafe<Record<string, unknown>>(aqUrl)
+      const aqUrl = `https://api.uk-air.defra.gov.uk/open-api/so2?lat=${site.lat}&lon=${site.lng}`
+      const aqMapUrl = 'https://uk-air.defra.gov.uk/interactive-map'
       const overpassQ = `[out:json][timeout:45];(node["natural"="tree"](around:200,${site.lat},${site.lng});way["landuse"="forest"](around:500,${site.lat},${site.lng});way["leisure"="park"](around:500,${site.lat},${site.lng});way["landuse"="grass"](around:500,${site.lat},${site.lng}););out geom;`
       const osm = await fetchJsonSafe<OverpassResp>('https://overpass-api.de/api/interpreter', {
         method: 'POST',
@@ -47,16 +47,17 @@ export function useEcologyData(site: SiteLocation | null): EcologyFetchState {
       const greenInfraPct = Math.min(95, 28 + Math.round(((osm?.elements?.length ?? 0) / 40) * 100))
       const rag = greenInfraPct >= 60 ? 'Good' : greenInfraPct >= 35 ? 'Moderate' : 'Poor'
       const data: EcologyData = {
-        nearestStation: aq ? 'Nearest AURN station (derived)' : 'Station unavailable',
-        no2Annual: aq ? 22.4 : undefined,
-        pm25Annual: aq ? 8.9 : undefined,
+        nearestStation: 'Use UK-AIR interactive map for nearest station',
+        no2Annual: undefined,
+        pm25Annual: undefined,
         treesCount: treeNodes.length,
         greenInfraPct,
         rag,
         parks,
         trees,
         sources: [
-          { label: 'DEFRA AURN', url: aqUrl, mode: aq ? 'partial' : 'fallback' },
+          { label: 'DEFRA UK-AIR API', url: aqUrl, mode: 'fallback' },
+          { label: 'UK-AIR interactive map', url: aqMapUrl, mode: 'live' },
           { label: 'Overpass OSM', url: 'https://overpass-api.de/', mode: osm ? 'partial' : 'fallback' },
         ],
       }

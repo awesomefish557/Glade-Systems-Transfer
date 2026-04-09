@@ -122,7 +122,7 @@ export function BaseMapModule({
   if (state.status === 'loading') {
     return (
       <div className="sonde-panel sonde-panel--loading">
-        <p>Querying OpenStreetMap via Overpass…</p>
+        <p>{state.message ?? 'Loading map data... (may take a moment)'}</p>
         <div className="sonde-radius-row">
           <label className="sonde-label">
             Radius (m)

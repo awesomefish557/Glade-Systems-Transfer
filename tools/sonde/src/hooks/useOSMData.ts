@@ -145,22 +145,24 @@ out geom;
     const isTimeout = e instanceof DOMException && e.name === 'AbortError'
     const is504 = message.includes('Overpass 504')
     if (!isTimeout && !is504) throw e
-    await sleep(3000)
+    await sleep(15_000)
     return runOnce()
   }
 }
 
 export type OSMFetchState =
   | { status: 'idle' }
-  | { status: 'loading' }
+  | { status: 'loading'; message?: string }
   | { status: 'error'; message: string }
   | { status: 'ok'; data: OSMPlanData }
+
+const OSM_CACHE_TTL_MS = 48 * 60 * 60 * 1000
 
 export function useOSMData(site: SiteLocation | null, radiusM: number): OSMFetchState {
   const [state, setState] = useState<OSMFetchState>({ status: 'idle' })
 
   useEffect(() => {
-    if (!site) {
+    if (!site || (site.lat === 0 && site.lng === 0)) {
       setState({ status: 'idle' })
       return
     }
@@ -169,17 +171,33 @@ export function useOSMData(site: SiteLocation | null, radiusM: number): OSMFetch
       site.lng.toFixed(5),
       radiusM,
     ])
-    const cached = cacheGet<OSMPlanData>(key)
-    if (cached) {
-      setState({ status: 'ok', data: cached })
-      return
+    try {
+      const raw = localStorage.getItem(key)
+      if (raw) {
+        const cached = JSON.parse(raw) as { expiresAt: number; data: OSMPlanData }
+        if (cached.expiresAt > Date.now()) {
+          setState({ status: 'ok', data: cached.data })
+          return
+        }
+      }
+    } catch {
+      const cached = cacheGet<OSMPlanData>(key)
+      if (cached) {
+        setState({ status: 'ok', data: cached })
+        return
+      }
     }
     let cancelled = false
-    setState({ status: 'loading' })
+    setState({ status: 'loading', message: 'Loading map data... (may take a moment)' })
     fetchOverpass(site.lat, site.lng, radiusM)
       .then((data) => {
         if (cancelled) return
         cacheSet(key, data)
+        try {
+          localStorage.setItem(key, JSON.stringify({ expiresAt: Date.now() + OSM_CACHE_TTL_MS, data }))
+        } catch {
+          /* ignore */
+        }
         setState({ status: 'ok', data })
       })
       .catch((e: unknown) => {

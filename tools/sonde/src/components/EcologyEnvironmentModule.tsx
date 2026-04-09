@@ -26,6 +26,9 @@ export function EcologyEnvironmentModule({
         <li><span className="sonde-flood-title">Annual mean PM2.5</span><span className="sonde-flood-sub">{d.pm25Annual != null ? `${d.pm25Annual} µg/m³` : 'Unavailable'}</span></li>
         <li><span className="sonde-flood-title">Mapped trees</span><span className="sonde-flood-sub">{d.treesCount}</span></li>
       </ul>
+      <p className="sonde-hint">
+        <a href="https://uk-air.defra.gov.uk/interactive-map" target="_blank" rel="noreferrer">Open DEFRA UK-AIR interactive map →</a>
+      </p>
     </div>
   )
 }

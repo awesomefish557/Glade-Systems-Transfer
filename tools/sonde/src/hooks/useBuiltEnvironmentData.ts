@@ -21,7 +21,7 @@ function postcodeFromAddress(address: string): string {
 export function useBuiltEnvironmentData(site: SiteLocation | null): BuiltEnvironmentFetchState {
   const [state, setState] = useState<BuiltEnvironmentFetchState>({ status: 'idle' })
   useEffect(() => {
-    if (!site) return void setState({ status: 'idle' })
+    if (!site || (site.lat === 0 && site.lng === 0)) return void setState({ status: 'idle' })
     const key = cacheKey('built', [site.lat.toFixed(4), site.lng.toFixed(4)])
     const cached = cacheGet<BuiltEnvironmentData>(key)
     if (cached) return void setState({ status: 'ok', data: cached })
@@ -48,12 +48,11 @@ export function useBuiltEnvironmentData(site: SiteLocation | null): BuiltEnviron
 
       const postcode = postcodeFromAddress(site.address)
       const epcUrl = postcode
-        ? `https://epc.opendatacommunities.org/api/v1/domestic/search?postcode=${encodeURIComponent(postcode)}&size=25`
-        : 'https://epc.opendatacommunities.org/'
-      const epc = postcode ? await fetchJsonSafe<Record<string, unknown>>(epcUrl) : null
+        ? `https://find-energy-certificate.service.gov.uk/find-a-certificate/search-by-postcode?postcode=${encodeURIComponent(postcode)}`
+        : 'https://find-energy-certificate.service.gov.uk'
       const data: BuiltEnvironmentData = {
         periodSummary: 'Predominantly late-19th/early-20th-century terraces with infill development.',
-        epcSummary: epc ? 'EPC sample loaded for nearby postcode area.' : 'EPC data unavailable in-browser; use official EPC portal.',
+        epcSummary: 'EPC API access is browser-blocked; use the official EPC register link.',
         avgHeightM,
         buildingCount: buildings.length,
         ageBuckets: [
@@ -66,7 +65,7 @@ export function useBuiltEnvironmentData(site: SiteLocation | null): BuiltEnviron
         heights,
         sources: [
           { label: 'Overpass OSM', url: 'https://overpass-api.de/', mode: osm ? 'partial' : 'fallback' },
-          { label: 'EPC Open Data', url: epcUrl, mode: epc ? 'partial' : 'fallback' },
+          { label: 'Check EPC ratings', url: epcUrl, mode: 'fallback' },
         ],
       }
       if (cancelled) return

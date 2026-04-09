@@ -784,6 +784,22 @@ body {
   background: #c44c3e;
 }
 
+.sonde-service-indicator {
+  position: fixed;
+  left: 10px;
+  bottom: 10px;
+  z-index: 70;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid #3b3229;
+  background: rgba(15, 13, 11, 0.88);
+  color: var(--sonde-ink-soft);
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+}
+
 .mapboxgl-ctrl-logo {
   opacity: 0.55 !important;
 }

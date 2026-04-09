@@ -1,6 +1,7 @@
 import 'mapbox-gl/dist/mapbox-gl.css'
 import mapboxgl from 'mapbox-gl'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties, ReactElement } from 'react'
 import SunCalc from 'suncalc'
 import { AddressSearch } from './components/AddressSearch'
 import { BaseMapModule } from './components/BaseMapModule'
@@ -13,6 +14,7 @@ import { FloodModule } from './components/FloodModule'
 import { GroundModule } from './components/GroundModule'
 import { LaserCutModule } from './components/LaserCutModule'
 import { LocalIntelModule } from './components/LocalIntelModule'
+import { ModuleErrorBoundary } from './components/ModuleErrorBoundary'
 import { MovementTransportModule } from './components/MovementTransportModule'
 import { ObservationTemplatesModule } from './components/ObservationTemplatesModule'
 import { PlanningPolicyModule } from './components/PlanningPolicyModule'
@@ -60,10 +62,15 @@ const TERRAIN_SOURCE_ID = 'sonde-dem'
 const OSM_BUILDING_SOURCE_ID = 'sonde-osm-buildings'
 const OSM_BUILDING_LAYER_ID = 'sonde-osm-buildings-3d'
 const MAPBOX_BUILDING_LAYER_ID = '3d-buildings'
+const SITE_BUILDING_LAYER_ID = 'site-building'
 const SONDE_DYNAMIC_SOURCE_ID = 'sonde-dynamic-overlays'
 const TREE_SOURCE_ID = 'sonde-tree-points'
-const TREE_LAYER_ID = 'sonde-tree-canopy'
+const TREE_LAYER_ID = 'sonde-tree-canopy-2d'
+const TREE_TRUNK_LAYER_ID = 'sonde-tree-trunks-3d'
+const TREE_CANOPY_LAYER_ID = 'sonde-tree-canopy-3d'
 const TREE_LABEL_LAYER_ID = 'sonde-tree-label'
+const SHADOW_SOURCE_ID = 'sonde-shadow-source'
+const SHADOW_LAYER_ID = 'sonde-shadow-layer'
 const ROOF_CONTOUR_SOURCE_ID = 'sonde-roof-contours'
 const ROOF_CONTOUR_LAYER_ID = 'sonde-roof-contours-line'
 const HISTORICAL_SOURCE_ID = 'sonde-historical-source'
@@ -93,13 +100,13 @@ function dayOfYearDate(year: number, dayIndex: number): Date {
   return new Date(year, 0, 1 + dayIndex, 12, 0, 0, 0)
 }
 
-function haversineM(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+function haversineM(aLat: number, aLng: number, bLat: number, bLng: number): number {
   const R = 6_371_000
   const toRad = (d: number) => (d * Math.PI) / 180
-  const dLat = toRad(b.lat - a.lat)
-  const dLng = toRad(b.lng - a.lng)
-  const a0 = toRad(a.lat)
-  const b0 = toRad(b.lat)
+  const dLat = toRad(bLat - aLat)
+  const dLng = toRad(bLng - aLng)
+  const a0 = toRad(aLat)
+  const b0 = toRad(bLat)
   const h =
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
     Math.cos(a0) * Math.cos(b0) * Math.sin(dLng / 2) * Math.sin(dLng / 2)
@@ -149,34 +156,65 @@ function centroidLatLng(ring: [number, number][]): { lat: number; lng: number } 
   return { lat: lat / n, lng: lng / n }
 }
 
+function projectLngLatMeters(lng: number, lat: number, bearingDeg: number, distanceM: number): [number, number] {
+  const br = (bearingDeg * Math.PI) / 180
+  const dLat = (distanceM * Math.cos(br)) / 111_320
+  const dLng = (distanceM * Math.sin(br)) / (111_320 * Math.cos((lat * Math.PI) / 180))
+  return [lng + dLng, lat + dLat]
+}
+
 function buildingHeightKey(lat: number, lng: number): string {
   return `${lat.toFixed(6)},${lng.toFixed(6)}`
 }
 
 async function fetchDefraLidarHeightM(lat: number, lng: number): Promise<number | null> {
-  const url = new URL(
-    'https://services.arcgis.com/JJzESW51TqeY9uat/arcgis/rest/services/LIDAR_Composite_DSM_2022/ImageServer/identify'
-  )
-  url.searchParams.set('geometry', `${lng},${lat}`)
-  url.searchParams.set('geometryType', 'esriGeometryPoint')
-  url.searchParams.set('returnGeometry', 'false')
-  url.searchParams.set('f', 'json')
-  const res = await fetch(url.toString())
-  if (!res.ok) return null
-  const json = (await res.json()) as {
-    value?: number | string
-    properties?: { Values?: number[] }
+  const parseArcgisValue = (json: unknown): number | null => {
+    const j = json as { value?: number | string; properties?: { Values?: number[] } }
+    const v =
+      typeof j.value === 'number'
+        ? j.value
+        : typeof j.value === 'string'
+          ? Number(j.value)
+          : Array.isArray(j.properties?.Values)
+            ? Number(j.properties!.Values[0])
+            : Number.NaN
+    return Number.isFinite(v) ? v : null
   }
-  const v =
-    typeof json.value === 'number'
-      ? json.value
-      : typeof json.value === 'string'
-        ? Number(json.value)
-        : Array.isArray(json.properties?.Values)
-          ? Number(json.properties!.Values[0])
-          : Number.NaN
-  if (!Number.isFinite(v) || v <= 0) return null
-  return v
+  const cacheKey = `lidar_${lat.toFixed(4)}_${lng.toFixed(4)}`
+  try {
+    const cached = localStorage.getItem(cacheKey)
+    if (cached) {
+      const parsed = JSON.parse(cached) as { dsm: number | null; dtm: number | null; height: number | null }
+      return parsed.height ?? null
+    }
+  } catch {
+    // ignore cache parse errors
+  }
+  try {
+    const dsmUrl = new URL(
+      'https://environment.data.gov.uk/arcgis/rest/services/EA/LidarComposite_DSM_2022/ImageServer/identify'
+    )
+    dsmUrl.searchParams.set('geometry', `${lng},${lat}`)
+    dsmUrl.searchParams.set('geometryType', 'esriGeometryPoint')
+    dsmUrl.searchParams.set('returnGeometry', 'false')
+    dsmUrl.searchParams.set('f', 'json')
+    const dtmUrl = new URL(
+      'https://environment.data.gov.uk/arcgis/rest/services/EA/LidarComposite_DTM_2022/ImageServer/identify'
+    )
+    dtmUrl.searchParams.set('geometry', `${lng},${lat}`)
+    dtmUrl.searchParams.set('geometryType', 'esriGeometryPoint')
+    dtmUrl.searchParams.set('returnGeometry', 'false')
+    dtmUrl.searchParams.set('f', 'json')
+    const [dsmRes, dtmRes] = await Promise.all([fetch(dsmUrl.toString()), fetch(dtmUrl.toString())])
+    if (!dsmRes.ok || !dtmRes.ok) return null
+    const dsm = parseArcgisValue(await dsmRes.json())
+    const dtm = parseArcgisValue(await dtmRes.json())
+    const height = dsm != null && dtm != null ? Math.max(0, dsm - dtm) : null
+    localStorage.setItem(cacheKey, JSON.stringify({ dsm, dtm, height }))
+    return height
+  } catch {
+    return null
+  }
 }
 
 function niceTickStep(range: number, targetTicks = 6): number {
@@ -199,6 +237,8 @@ function siteId(lat: number, lng: number): string {
 type SectionPoint = { lng: number; lat: number }
 type ElevationSample = { lng: number; lat: number; distanceM: number; elevationM: number }
 type SectionScale = '1:100' | '1:200' | '1:500' | '1:1000'
+type SectionPreviewTheme = 'dark' | 'light'
+type ServiceStatus = 'ok' | 'error' | 'loading'
 type LidarBuildingData = {
   buildingId: string
   footprint: [number, number][]
@@ -341,7 +381,6 @@ export default function App() {
   const [radiusM, setRadiusM] = useState(100)
   const [mapLoaded, setMapLoaded] = useState(false)
   const [is3DView, setIs3DView] = useState(false)
-  const [terrainExaggeration, setTerrainExaggeration] = useState<0 | 0.5 | 1 | 2 | 3>(1)
   const [shadowDayIndex, setShadowDayIndex] = useState(dayIndexFromDate(new Date()))
   const [shadowDayProgress, setShadowDayProgress] = useState(500)
   const [sectionMode, setSectionMode] = useState(false)
@@ -349,6 +388,7 @@ export default function App() {
   const [sectionProfile, setSectionProfile] = useState<ElevationSample[] | null>(null)
   const [sectionScale, setSectionScale] = useState<SectionScale>('1:200')
   const [sectionFlip, setSectionFlip] = useState(false)
+  const [sectionPreviewTheme, setSectionPreviewTheme] = useState<SectionPreviewTheme>('dark')
   const [savedSites, setSavedSites] = useState<SavedSite[]>([])
   const [savedSitesOpen, setSavedSitesOpen] = useState(false)
   const [lidarHeightsByKey, setLidarHeightsByKey] = useState<Record<string, number>>({})
@@ -358,25 +398,29 @@ export default function App() {
   const [lidarHeightsEnabled, setLidarHeightsEnabled] = useState(true)
   const [treeStatus, setTreeStatus] = useState('')
   const [lidarStatus, setLidarStatus] = useState('')
+  const [mapPipelineStatus, setMapPipelineStatus] = useState('Loading: buildings… trees… shadows…')
+  const [mapPipelineUpdatedAt, setMapPipelineUpdatedAt] = useState<Date | null>(null)
   const [showBusStops, setShowBusStops] = useState(false)
   const [showCycleRoutes, setShowCycleRoutes] = useState(false)
   const [showWalkIsochrones, setShowWalkIsochrones] = useState(false)
   const [historicalEnabled, setHistoricalEnabled] = useState(false)
   const [historicalYear, setHistoricalYear] = useState<'1890' | '1950' | 'modern'>('modern')
   const [historicalOpacity, setHistoricalOpacity] = useState(0.45)
+  const [claudeStatus, setClaudeStatus] = useState<ServiceStatus>('loading')
   const urlSiteAppliedRef = useRef(false)
 
-  const solar = useSolarData(site)
-  const wind = useWindData(site)
-  const climate = useClimateData(site)
-  const flood = useFloodData(site, 5)
-  const ground = useGroundData(site, 0)
-  const planning = usePlanningData(site)
-  const demographics = useDemographicsData(site)
-  const movement = useMovementData(site)
-  const ecology = useEcologyData(site)
-  const built = useBuiltEnvironmentData(site)
-  const osm = useOSMData(site, radiusM)
+  const apiSite = site && !(site.lat === 0 && site.lng === 0) ? site : null
+  const solar = useSolarData(apiSite)
+  const wind = useWindData(apiSite)
+  const climate = useClimateData(apiSite)
+  const flood = useFloodData(apiSite, 5)
+  const ground = useGroundData(apiSite, 0)
+  const planning = usePlanningData(apiSite)
+  const demographics = useDemographicsData(apiSite)
+  const movement = useMovementData(apiSite)
+  const ecology = useEcologyData(apiSite)
+  const built = useBuiltEnvironmentData(apiSite)
+  const osm = useOSMData(apiSite, radiusM)
 
   useEffect(() => {
     try {
@@ -411,11 +455,53 @@ export default function App() {
     map.on('load', () => {
       map.resize()
       setMapLoaded(true)
+      // 1) Terrain source
+      if (!map.getSource('dem')) {
+        map.addSource('dem', {
+          type: 'raster-dem',
+          url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
+          tileSize: 512,
+        })
+      }
       if (!map.getSource(TERRAIN_SOURCE_ID)) {
         map.addSource(TERRAIN_SOURCE_ID, {
           type: 'raster-dem',
           url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
           tileSize: 512,
+        })
+      }
+      // 2) Base 3D buildings from Mapbox vector tiles
+      if (!map.getLayer(MAPBOX_BUILDING_LAYER_ID) && map.getSource('composite')) {
+        map.addLayer({
+          id: MAPBOX_BUILDING_LAYER_ID,
+          source: 'composite',
+          'source-layer': 'building',
+          filter: ['==', 'extrude', 'true'],
+          type: 'fill-extrusion',
+          minzoom: 14,
+          paint: {
+            'fill-extrusion-color': '#aaaaaa',
+            'fill-extrusion-height': ['interpolate', ['linear'], ['zoom'], 15, 0, 15.05, ['get', 'height']],
+            'fill-extrusion-base': ['interpolate', ['linear'], ['zoom'], 15, 0, 15.05, ['get', 'min_height']],
+            'fill-extrusion-opacity': 0.9,
+          },
+        })
+      }
+      // 3) Site building highlight layer (filter updated after site/viewport updates)
+      if (!map.getLayer(SITE_BUILDING_LAYER_ID) && map.getSource('composite')) {
+        map.addLayer({
+          id: SITE_BUILDING_LAYER_ID,
+          source: 'composite',
+          'source-layer': 'building',
+          filter: ['all', ['==', 'extrude', 'true'], ['==', ['id'], -1]],
+          type: 'fill-extrusion',
+          minzoom: 14,
+          paint: {
+            'fill-extrusion-color': '#E8621A',
+            'fill-extrusion-height': ['coalesce', ['feature-state', 'height'], ['get', 'height'], 8],
+            'fill-extrusion-base': ['coalesce', ['get', 'min_height'], 0],
+            'fill-extrusion-opacity': 0.95,
+          },
         })
       }
     })
@@ -439,25 +525,6 @@ export default function App() {
       setMapLoaded(false)
     }
   }, [token])
-
-  useEffect(() => {
-    const map = mapRef.current
-    if (!map || !mapLoaded) return
-    if (!map.getSource(TERRAIN_SOURCE_ID)) {
-      map.addSource(TERRAIN_SOURCE_ID, {
-        type: 'raster-dem',
-        url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
-        tileSize: 512,
-      })
-    }
-    if (is3DView) {
-      map.setTerrain({ source: TERRAIN_SOURCE_ID, exaggeration: terrainExaggeration })
-      map.easeTo({ pitch: 55, duration: 500 })
-    } else {
-      map.setTerrain(null)
-      map.easeTo({ pitch: 0, bearing: 0, duration: 350 })
-    }
-  }, [mapLoaded, is3DView, terrainExaggeration])
 
   useEffect(() => {
     const p = new URLSearchParams(window.location.search)
@@ -488,6 +555,42 @@ export default function App() {
       essential: true,
     })
   }, [mapLoaded])
+
+  useEffect(() => {
+    let cancelled = false
+    const ctrl = new AbortController()
+    const timeout = window.setTimeout(() => ctrl.abort(), 7000)
+    ;(async () => {
+      setClaudeStatus('loading')
+      try {
+        const res = await fetch('/anthropic-api/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-20250514',
+            max_tokens: 1,
+            messages: [{ role: 'user', content: 'ping' }],
+          }),
+          signal: ctrl.signal,
+        })
+        if (cancelled) return
+        setClaudeStatus(res.ok ? 'ok' : 'error')
+      } catch {
+        if (cancelled) return
+        setClaudeStatus('error')
+      } finally {
+        window.clearTimeout(timeout)
+      }
+    })()
+    return () => {
+      cancelled = true
+      ctrl.abort()
+      window.clearTimeout(timeout)
+    }
+  }, [])
 
   const onSite = useCallback((s: SiteLocation) => {
     setSite(s)
@@ -700,33 +803,14 @@ export default function App() {
     }
   }, [site, shadowDayIndex, shadowDayProgress])
 
-  useEffect(() => {
-    const map = mapRef.current
-    if (!map || !mapLoaded || !shadowState) return
-    const direction: [number, number] = [
-      shadowState.azimuthFromNorth,
-      Math.max(0.1, shadowState.altitude),
-    ]
-    try {
-      map.setLights([
-        {
-          id: 'flat',
-          type: 'flat',
-          properties: {
-            color: 'white',
-            intensity: 0.8,
-            direction,
-          },
-        },
-      ] as unknown as mapboxgl.LightsSpecification[])
-    } catch (e) {
-      console.warn('Sonde: map.setLights skipped (style or GL may not support it):', e)
-    }
-  }, [mapLoaded, shadowState])
-
   const sectionDistanceM = useMemo(() => {
     if (sectionPoints.length < 2) return 0
-    return haversineM(sectionPoints[0], sectionPoints[1])
+    return haversineM(
+      sectionPoints[0].lat,
+      sectionPoints[0].lng,
+      sectionPoints[1].lat,
+      sectionPoints[1].lng
+    )
   }, [sectionPoints])
 
   useEffect(() => {
@@ -855,7 +939,7 @@ export default function App() {
       const map = mapRef.current
       if (!map) return
       console.log(`Section: A=[${start.lat}, ${start.lng}] B=[${end.lat}, ${end.lng}]`)
-      const distanceM = Math.max(1, haversineM(start, end))
+      const distanceM = Math.max(1, haversineM(start.lat, start.lng, end.lat, end.lng))
       console.log(`Section: total distance = ${distanceM.toFixed(0)}m`)
       const demSource = 'mapbox-terrain-dem-v1'
       if (!map.getSource(demSource)) {
@@ -942,7 +1026,7 @@ export default function App() {
         const ring = b.rings[0]
         if (!ring || !ring.length) return false
         const c = centroidLatLng(ring)
-        return haversineM(site, c) <= 200
+        return haversineM(site.lat, site.lng, c.lat, c.lng) <= 200
       })
       .slice(0, 40)
     if (!buildings.length) return
@@ -957,6 +1041,7 @@ export default function App() {
         if (lidarHeightsByKey[key] != null || lidarByBuilding[key]) {
           done += 1
           setLidarStatus(`Loading roof data: ${done}/${buildings.length}`)
+          setMapPipelineStatus(`Loading: buildings ${done}/${buildings.length} · trees… · shadows…`)
           continue
         }
         const cacheKey = `sonde_lidar_${key}`
@@ -969,6 +1054,7 @@ export default function App() {
               setLidarHeightsByKey((prev) => ({ ...prev, [key]: cached.data.maxHeight }))
               done += 1
               setLidarStatus(`Loading roof data: ${done}/${buildings.length}`)
+              setMapPipelineStatus(`Loading: buildings ${done}/${buildings.length} · trees… · shadows…`)
               continue
             }
           }
@@ -991,6 +1077,25 @@ export default function App() {
             }
             setLidarByBuilding((prev) => ({ ...prev, [key]: lidarData }))
             setLidarHeightsByKey((prev) => ({ ...prev, [key]: h }))
+            const map = mapRef.current
+            if (map && mapLoaded && map.getLayer(MAPBOX_BUILDING_LAYER_ID)) {
+              const p = map.project([c.lng, c.lat])
+              const near = map.queryRenderedFeatures(
+                [
+                  [p.x - 12, p.y - 12],
+                  [p.x + 12, p.y + 12],
+                ],
+                { layers: [MAPBOX_BUILDING_LAYER_ID] }
+              )
+              near.forEach((f) => {
+                if (f.id == null) return
+                try {
+                  map.setFeatureState({ source: 'composite', sourceLayer: 'building', id: f.id as number | string }, { height: h })
+                } catch {
+                  // ignore non-addressable tile features
+                }
+              })
+            }
             localStorage.setItem(
               cacheKey,
               JSON.stringify({ expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000, data: lidarData })
@@ -1001,9 +1106,14 @@ export default function App() {
         }
         done += 1
         setLidarStatus(`Loading roof data: ${done}/${buildings.length}`)
+        setMapPipelineStatus(`Loading: buildings ${done}/${buildings.length} · trees… · shadows…`)
         await new Promise((resolve) => setTimeout(resolve, 500))
       }
-      if (!cancelled) setLidarStatus('')
+      if (!cancelled) {
+        setLidarStatus('')
+        setMapPipelineStatus('Loading: buildings ✓ · trees… · shadows…')
+        setMapPipelineUpdatedAt(new Date())
+      }
     })()
     return () => {
       cancelled = true
@@ -1056,29 +1166,37 @@ export default function App() {
         },
       })
     }
-    // Fallback to native Mapbox building footprints so 3D massing is always visible.
-    if (is3DView && !map.getLayer(MAPBOX_BUILDING_LAYER_ID) && map.getSource('composite')) {
-      map.addLayer({
-        id: MAPBOX_BUILDING_LAYER_ID,
-        source: 'composite',
-        'source-layer': 'building',
-        type: 'fill-extrusion',
-        minzoom: 14,
-        paint: {
-          'fill-extrusion-color': '#aaaaaa',
-          'fill-extrusion-height': ['coalesce', ['feature-state', 'height'], ['get', 'height'], 10],
-          'fill-extrusion-base': ['coalesce', ['get', 'min_height'], 0],
-          'fill-extrusion-opacity': 0.9,
-        },
-      })
+    if (map.getLayer(OSM_BUILDING_LAYER_ID)) {
+      map.setLayoutProperty(OSM_BUILDING_LAYER_ID, 'visibility', is3DView ? 'visible' : 'none')
     }
-    if (!is3DView && map.getLayer(OSM_BUILDING_LAYER_ID)) {
-      map.removeLayer(OSM_BUILDING_LAYER_ID)
+    if (map.getLayer(MAPBOX_BUILDING_LAYER_ID)) {
+      map.setLayoutProperty(MAPBOX_BUILDING_LAYER_ID, 'visibility', is3DView ? 'visible' : 'none')
     }
-    if (!is3DView && map.getLayer(MAPBOX_BUILDING_LAYER_ID)) {
-      map.removeLayer(MAPBOX_BUILDING_LAYER_ID)
+    if (map.getLayer(SITE_BUILDING_LAYER_ID)) {
+      map.setLayoutProperty(SITE_BUILDING_LAYER_ID, 'visibility', is3DView ? 'visible' : 'none')
     }
   }, [is3DView, mapLoaded, osm, site, lidarHeightsByKey, lidarHeightsEnabled])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !mapLoaded || !site || !map.getLayer(SITE_BUILDING_LAYER_ID)) return
+    const updateSiteBuildingFilter = () => {
+      const p = map.project([site.lng, site.lat])
+      const bbox: [mapboxgl.PointLike, mapboxgl.PointLike] = [
+        [p.x - 22, p.y - 22],
+        [p.x + 22, p.y + 22],
+      ]
+      const candidates = map.queryRenderedFeatures(bbox, { layers: [MAPBOX_BUILDING_LAYER_ID] })
+      const withIds = candidates.filter((f) => f.id != null)
+      if (!withIds.length) return
+      map.setFilter(SITE_BUILDING_LAYER_ID, ['all', ['==', 'extrude', 'true'], ['==', ['id'], withIds[0].id as number | string]])
+    }
+    updateSiteBuildingFilter()
+    map.on('moveend', updateSiteBuildingFilter)
+    return () => {
+      map.off('moveend', updateSiteBuildingFilter)
+    }
+  }, [mapLoaded, site])
 
   useEffect(() => {
     const map = mapRef.current
@@ -1114,14 +1232,18 @@ export default function App() {
       popup
         .setLngLat(e.lngLat)
         .setHTML(
-          `Height: ${h.toFixed(1)}m (${lidarH != null ? 'LiDAR' : 'OSM'})<br/>Roof type: ${roofDetected}<br/>Building: ${b.buildingType ?? 'unknown'}<br/>ID: ${b.id ?? 'B???'}`
+          `Height: ${h.toFixed(1)}m (${lidarH != null ? 'LiDAR 2022' : 'estimated'})<br/>Roof type: ${roofDetected}<br/>Building: ${b.buildingType ?? 'unknown'}<br/>ID: ${b.id ?? 'B???'}`
         )
         .addTo(map)
     }
     if (map.getLayer(OSM_BUILDING_LAYER_ID)) map.on('click', OSM_BUILDING_LAYER_ID, onClick)
+    if (map.getLayer(MAPBOX_BUILDING_LAYER_ID)) map.on('click', MAPBOX_BUILDING_LAYER_ID, onClick)
+    if (map.getLayer(SITE_BUILDING_LAYER_ID)) map.on('click', SITE_BUILDING_LAYER_ID, onClick)
     return () => {
       popup.remove()
       if (map.getLayer(OSM_BUILDING_LAYER_ID)) map.off('click', OSM_BUILDING_LAYER_ID, onClick)
+      if (map.getLayer(MAPBOX_BUILDING_LAYER_ID)) map.off('click', MAPBOX_BUILDING_LAYER_ID, onClick)
+      if (map.getLayer(SITE_BUILDING_LAYER_ID)) map.off('click', SITE_BUILDING_LAYER_ID, onClick)
     }
   }, [mapLoaded, osm, lidarHeightsByKey])
 
@@ -1131,6 +1253,8 @@ export default function App() {
     if (!treesEnabled) {
       if (map.getLayer(TREE_LABEL_LAYER_ID)) map.removeLayer(TREE_LABEL_LAYER_ID)
       if (map.getLayer(TREE_LAYER_ID)) map.removeLayer(TREE_LAYER_ID)
+      if (map.getLayer(TREE_CANOPY_LAYER_ID)) map.removeLayer(TREE_CANOPY_LAYER_ID)
+      if (map.getLayer(TREE_TRUNK_LAYER_ID)) map.removeLayer(TREE_TRUNK_LAYER_ID)
       if (map.getSource(TREE_SOURCE_ID)) map.removeSource(TREE_SOURCE_ID)
       setTreeStatus('')
       return
@@ -1159,6 +1283,8 @@ export default function App() {
     const maxTrees = 200
     const shown = trees.length > maxTrees ? trees.sort(() => Math.random() - 0.5).slice(0, maxTrees) : trees
     setTreeStatus(`Showing ${shown.length} of ${trees.length} trees`)
+    setMapPipelineStatus((prev) => (prev.includes('buildings ✓') ? 'Loading: buildings ✓ · trees ✓ · shadows…' : prev))
+    setMapPipelineUpdatedAt(new Date())
     const fc: GeoJSON.FeatureCollection = {
       type: 'FeatureCollection',
       features: shown.map((t) => ({
@@ -1189,6 +1315,35 @@ export default function App() {
         },
       })
     }
+    if (!map.getLayer(TREE_TRUNK_LAYER_ID)) {
+      map.addLayer({
+        id: TREE_TRUNK_LAYER_ID,
+        type: 'fill-extrusion',
+        source: TREE_SOURCE_ID,
+        paint: {
+          'fill-extrusion-color': ['match', ['get', 'lc'], 'evergreen', '#2d5a27', '#4a7c3f'],
+          'fill-extrusion-height': ['coalesce', ['get', 'h'], 8],
+          'fill-extrusion-base': 0,
+          'fill-extrusion-opacity': 0.8,
+        },
+      })
+    }
+    if (!map.getLayer(TREE_CANOPY_LAYER_ID)) {
+      map.addLayer({
+        id: TREE_CANOPY_LAYER_ID,
+        type: 'circle',
+        source: TREE_SOURCE_ID,
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 13, 1.5, 18, ['coalesce', ['get', 'c'], 6]],
+          'circle-color': ['match', ['get', 'lc'], 'evergreen', '#2d5a27', '#4a7c3f'],
+          'circle-opacity': 0.6,
+          'circle-stroke-color': '#ffffff',
+          'circle-stroke-width': 0.35,
+        },
+      })
+    }
+    if (map.getLayer(TREE_TRUNK_LAYER_ID)) map.setLayoutProperty(TREE_TRUNK_LAYER_ID, 'visibility', is3DView ? 'visible' : 'none')
+    if (map.getLayer(TREE_CANOPY_LAYER_ID)) map.setLayoutProperty(TREE_CANOPY_LAYER_ID, 'visibility', is3DView ? 'visible' : 'none')
     const popup = new mapboxgl.Popup({ closeButton: false, closeOnClick: false })
     const onEnter = () => (map.getCanvas().style.cursor = 'pointer')
     const onLeave = () => {
@@ -1215,7 +1370,48 @@ export default function App() {
       map.off('mousemove', TREE_LAYER_ID, onMove)
       popup.remove()
     }
-  }, [treesEnabled, mapLoaded, site, osm])
+  }, [treesEnabled, mapLoaded, site, osm, is3DView])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !mapLoaded || !site || osm.status !== 'ok' || !shadowState) return
+    const altitude = Math.max(0.5, shadowState.altitude)
+    const shadowBearing = (shadowState.azimuthFromNorth + 180) % 360
+    const features: GeoJSON.Feature[] = []
+    for (const b of osm.data.buildings.slice(0, 200)) {
+      const ring = b.rings[0]
+      if (!ring || ring.length < 4) continue
+      const c = centroidLatLng(ring)
+      const key = buildingHeightKey(c.lat, c.lng)
+      const h = lidarHeightsByKey[key] ?? b.heightM ?? (b.levels ? b.levels * 3 : 6)
+      const shadowLen = h / Math.tan((altitude * Math.PI) / 180)
+      const base = ring.map(([lat, lng]) => [lng, lat] as [number, number])
+      const top = base.map(([lng, lat]) => projectLngLatMeters(lng, lat, shadowBearing, shadowLen))
+      const poly: [number, number][] = [...base, ...top.reverse(), base[0]]
+      features.push({
+        type: 'Feature',
+        properties: { h },
+        geometry: { type: 'Polygon', coordinates: [poly] },
+      })
+    }
+    const fc: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features }
+    if (!map.getSource(SHADOW_SOURCE_ID)) map.addSource(SHADOW_SOURCE_ID, { type: 'geojson', data: fc })
+    else (map.getSource(SHADOW_SOURCE_ID) as mapboxgl.GeoJSONSource).setData(fc)
+    if (!map.getLayer(SHADOW_LAYER_ID)) {
+      map.addLayer({
+        id: SHADOW_LAYER_ID,
+        type: 'fill',
+        source: SHADOW_SOURCE_ID,
+        paint: {
+          'fill-color': '#000000',
+          'fill-opacity': 0.4,
+        },
+      })
+    }
+    map.setLayoutProperty(SHADOW_LAYER_ID, 'visibility', is3DView ? 'visible' : 'none')
+    setMapPipelineStatus('Loading: buildings ✓ · trees ✓ · shadows ✓')
+    setMapPipelineUpdatedAt(new Date())
+  }, [mapLoaded, site, osm, shadowState, lidarHeightsByKey, is3DView])
 
   useEffect(() => {
     const map = mapRef.current
@@ -1405,6 +1601,7 @@ export default function App() {
 
   const sectionBuildings = useMemo(() => {
     if (!sectionProfile || sectionProfile.length < 2 || sectionPoints.length < 2 || osm.status !== 'ok') return []
+    const map = mapRef.current
     const a: [number, number] = [sectionPoints[0].lng, sectionPoints[0].lat]
     const b: [number, number] = [sectionPoints[1].lng, sectionPoints[1].lat]
     const distanceM = sectionProfile[sectionProfile.length - 1].distanceM
@@ -1426,6 +1623,28 @@ export default function App() {
     }
 
     const out: Array<{ startM: number; endM: number; topM: number; baseM: number; label: string; context: boolean }> = []
+    const fallbackHeightFromMapbox = (lat: number, lng: number): number | null => {
+      if (!map || !mapLoaded || !map.getLayer(MAPBOX_BUILDING_LAYER_ID)) return null
+      const p = map.project([lng, lat])
+      const feats = map.queryRenderedFeatures(
+        [
+          [p.x - 8, p.y - 8],
+          [p.x + 8, p.y + 8],
+        ],
+        { layers: [MAPBOX_BUILDING_LAYER_ID] }
+      )
+      const raw = feats[0]?.properties?.height
+      const parsed = typeof raw === 'number' ? raw : Number(raw)
+      return Number.isFinite(parsed) ? parsed : null
+    }
+    const resolvedHeight = (bld: (typeof osm.data.buildings)[number]): number => {
+      const ring0 = bld.rings[0]
+      const c0 = ring0 ? centroidLatLng(ring0) : null
+      const key = c0 ? buildingHeightKey(c0.lat, c0.lng) : ''
+      const lidarH = key ? lidarHeightsByKey[key] : null
+      const mapboxH = c0 ? fallbackHeightFromMapbox(c0.lat, c0.lng) : null
+      return lidarH ?? mapboxH ?? bld.heightM ?? (bld.levels ? bld.levels * 3 : 6)
+    }
     for (const bld of osm.data.buildings) {
       const ring = bld.rings[0]?.map(([lat, lon]) => [lon, lat] as [number, number])
       if (!ring || ring.length < 3) continue
@@ -1443,7 +1662,7 @@ export default function App() {
         const startM = startT * distanceM
         const endM = endT * distanceM
         if (endM - startM < 1) continue
-        const h = bld.heightM ?? (bld.levels ? bld.levels * 3 : 6)
+        const h = resolvedHeight(bld)
         const centerM = (startM + endM) / 2
         const baseM = terrainAt(centerM)
         const topM = baseM + h
@@ -1470,7 +1689,7 @@ export default function App() {
         const wM = Math.max(3, Math.sqrt((ring.length - 1)) * 2)
         const startM = Math.max(0, centerM - wM / 2)
         const endM = Math.min(distanceM, centerM + wM / 2)
-        const h = bld.heightM ?? (bld.levels ? bld.levels * 3 : 6)
+        const h = resolvedHeight(bld)
         const baseM = terrainAt(centerM)
         const topM = baseM + h
         const label = bld.name ?? bld.buildingType ?? 'building'
@@ -1479,7 +1698,7 @@ export default function App() {
     }
     console.log(`Section: found ${out.filter((bld) => !bld.context).length} buildings intersecting line`)
     return out
-  }, [sectionProfile, sectionPoints, osm])
+  }, [sectionProfile, sectionPoints, osm, lidarHeightsByKey, mapLoaded])
 
   const applyShadowPreset = useCallback(
     (month: number, day: number, hour: number) => {
@@ -1497,31 +1716,35 @@ export default function App() {
     [site]
   )
 
+  const wrapModule = (moduleName: string, node: ReactElement) => (
+    <ModuleErrorBoundary moduleName={moduleName}>{node}</ModuleErrorBoundary>
+  )
+
   const panel = (() => {
     switch (active) {
       case 'solar':
-        return <SolarModule data={solar} />
+        return wrapModule('Solar', <SolarModule data={solar} />)
       case 'wind':
-        return <WindModule state={wind} />
+        return wrapModule('Wind', <WindModule state={wind} />)
       case 'climate':
-        return <ClimateModule state={climate} />
+        return wrapModule('Climate', <ClimateModule state={climate} />)
       case 'flood':
-        return (
+        return wrapModule('Flood', (
           <FloodModule
             site={site}
             state={flood}
           />
-        )
+        ))
       case 'ground':
-        return <GroundModule site={site} />
+        return wrapModule('Ground', <GroundModule site={site} />)
       case 'lasercut':
-        return <LaserCutModule site={site} radiusM={radiusM} onRadius={setRadiusM} map={mapInstance} osm={osm} />
+        return wrapModule('Laser Cut', <LaserCutModule site={site} radiusM={radiusM} onRadius={setRadiusM} map={mapInstance} osm={osm} />)
       case 'planning':
-        return <PlanningPolicyModule site={site} state={planning} />
+        return wrapModule('Planning', <PlanningPolicyModule site={site} state={planning} />)
       case 'demographics':
-        return <DemographicsModule site={site} state={demographics} />
+        return wrapModule('Demographics', <DemographicsModule site={site} state={demographics} />)
       case 'movement':
-        return (
+        return wrapModule('Movement', (
           <MovementTransportModule
             site={site}
             state={movement}
@@ -1532,19 +1755,19 @@ export default function App() {
             walkIsoEnabled={showWalkIsochrones}
             onWalkIsoEnabled={setShowWalkIsochrones}
           />
-        )
+        ))
       case 'ecology':
-        return <EcologyEnvironmentModule site={site} state={ecology} />
+        return wrapModule('Ecology', <EcologyEnvironmentModule site={site} state={ecology} />)
       case 'built':
-        return <BuiltEnvironmentModule site={site} state={built} />
+        return wrapModule('Built', <BuiltEnvironmentModule site={site} state={built} />)
       case 'templates':
-        return <ObservationTemplatesModule site={site} />
+        return wrapModule('Templates', <ObservationTemplatesModule site={site} />)
       case 'precedents':
-        return <PrecedentsModule site={site} solar={solar} flood={flood} radiusM={radiusM} />
+        return wrapModule('Precedents', <PrecedentsModule site={site} solar={solar} flood={flood} radiusM={radiusM} />)
       case 'localIntel':
-        return <LocalIntelModule site={site} />
+        return wrapModule('Local Intel', <LocalIntelModule site={site} />)
       case 'basemap':
-        return (
+        return wrapModule('Base map', (
           <BaseMapModule
             site={site}
             radiusM={radiusM}
@@ -1557,9 +1780,9 @@ export default function App() {
             onHistoricalEnabled={setHistoricalEnabled}
             state={osm}
           />
-        )
+        ))
       case 'export':
-        return (
+        return wrapModule('Export', (
           <ExportModule
             site={site}
             solar={solar}
@@ -1577,11 +1800,18 @@ export default function App() {
             onExportFile={recordExportedFile}
             osm={osm}
           />
-        )
+        ))
       default:
         return null
     }
   })()
+
+  const mapboxStatus: ServiceStatus = token && mapLoaded ? 'ok' : 'error'
+  const osmStatus: ServiceStatus = osm.status === 'ok' ? 'ok' : osm.status === 'error' ? 'error' : 'loading'
+  const allServicesOk = mapboxStatus === 'ok' && claudeStatus === 'ok' && osmStatus === 'ok'
+  const anyServiceError = mapboxStatus === 'error' || claudeStatus === 'error' || osmStatus === 'error'
+  const serviceTone = allServicesOk ? 'green' : anyServiceError ? 'red' : 'amber'
+  const serviceMark = (status: ServiceStatus) => (status === 'ok' ? '✓' : status === 'error' ? '✕' : '…')
 
   const downloadSectionSvg = useCallback(() => {
     const el = document.getElementById('sonde-svg-section') as SVGSVGElement | null
@@ -1595,6 +1825,18 @@ export default function App() {
     const clone = el.cloneNode(true) as SVGSVGElement
     clone.setAttribute('width', `${widthMm.toFixed(1)}mm`)
     clone.setAttribute('height', `${heightMm.toFixed(1)}mm`)
+    // Export is always light mode for print/tracing quality.
+    clone.style.setProperty('--section-bg', '#ffffff')
+    clone.style.setProperty('--section-ground-fill', '#eeeeee')
+    clone.style.setProperty('--section-ground-line', '#111111')
+    clone.style.setProperty('--section-ground-line-width', '2')
+    clone.style.setProperty('--section-building-fill', '#333333')
+    clone.style.setProperty('--section-building-stroke', '#111111')
+    clone.style.setProperty('--section-building-stroke-width', '0.5')
+    clone.style.setProperty('--section-text', '#111111')
+    clone.style.setProperty('--section-grid', '#111111')
+    clone.style.setProperty('--section-context-stroke', '#111111')
+    clone.style.setProperty('--section-axis', '#111111')
     const blob = new Blob([clone.outerHTML], { type: 'image/svg+xml;charset=utf-8' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
@@ -1722,6 +1964,7 @@ export default function App() {
             ) : null}
           </div>
 
+          <ModuleErrorBoundary moduleName="Map tools">
           <section className="sonde-map-tools">
             <div className="sonde-map-tools-row">
               <button
@@ -1732,19 +1975,6 @@ export default function App() {
               >
                 {is3DView ? 'Flat / 3D: 3D' : 'Flat / 3D: Flat'}
               </button>
-              <label className="sonde-label">
-                Terrain
-                <select
-                  value={terrainExaggeration}
-                  onChange={(e) => setTerrainExaggeration(Number(e.target.value) as 0 | 0.5 | 1 | 2 | 3)}
-                >
-                  <option value={0}>0x</option>
-                  <option value={0.5}>0.5x</option>
-                  <option value={1}>1x</option>
-                  <option value={2}>2x</option>
-                  <option value={3}>3x</option>
-                </select>
-              </label>
               <button
                 type="button"
                 className={`sonde-btn ${sectionMode ? 'sonde-btn--primary' : ''}`}
@@ -1799,6 +2029,9 @@ export default function App() {
             </div>
             {treeStatus ? <p className="sonde-hint">{treeStatus}</p> : null}
             {lidarStatus ? <p className="sonde-hint">{lidarStatus}</p> : null}
+            <p className="sonde-hint sonde-mono">
+              {`Buildings: ${lidarHeightsEnabled ? 'LiDAR' : 'Mapbox/OSM'} | Trees: OSM | Shadows: calculated | ${mapPipelineStatus} | Last updated: ${mapPipelineUpdatedAt ? mapPipelineUpdatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}`}
+            </p>
 
             <div className="sonde-map-tools-grid">
               <label className="sonde-label sonde-label--precision">
@@ -1877,23 +2110,70 @@ export default function App() {
                       40
                     ).toFixed(1)}mm tall on paper
                   </span>
+                  <button
+                    type="button"
+                    className="sonde-btn sonde-btn--ghost"
+                    onClick={() => setSectionPreviewTheme((v) => (v === 'dark' ? 'light' : 'dark'))}
+                  >
+                    {sectionPreviewTheme === 'dark' ? 'Light Export' : 'Dark Preview'}
+                  </button>
                 </div>
-                <svg id="sonde-svg-section" viewBox="0 0 820 300" className="sonde-svg" role="img" aria-label="Terrain elevation profile">
+                <svg
+                  id="sonde-svg-section"
+                  viewBox="0 0 820 300"
+                  className="sonde-svg"
+                  role="img"
+                  aria-label="Terrain elevation profile"
+                  style={
+                    sectionPreviewTheme === 'dark'
+                      ? {
+                          '--section-bg': '#111111',
+                          '--section-ground-fill': '#222222',
+                          '--section-ground-line': '#ffffff',
+                          '--section-ground-line-width': '2',
+                          '--section-building-fill': '#444444',
+                          '--section-building-stroke': '#ffffff',
+                          '--section-building-stroke-width': '0.5',
+                          '--section-text': '#ffffff',
+                          '--section-grid': '#222222',
+                          '--section-context-stroke': '#555555',
+                          '--section-axis': '#ffffff',
+                          fontFamily: 'monospace',
+                        } as CSSProperties
+                      : {
+                          '--section-bg': '#ffffff',
+                          '--section-ground-fill': '#eeeeee',
+                          '--section-ground-line': '#111111',
+                          '--section-ground-line-width': '2',
+                          '--section-building-fill': '#333333',
+                          '--section-building-stroke': '#333333',
+                          '--section-building-stroke-width': '0',
+                          '--section-text': '#111111',
+                          '--section-grid': '#111111',
+                          '--section-context-stroke': '#777777',
+                          '--section-axis': '#111111',
+                          fontFamily: 'monospace',
+                        } as CSSProperties
+                  }
+                >
+                  <rect width="100%" height="100%" fill="var(--section-bg)" />
                   <defs>
-                    <pattern id="sonde-section-hatch" width="3" height="3" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-                      <line x1="0" y1="0" x2="0" y2="3" stroke="#111111" strokeWidth="0.4" />
+                    <pattern id="sonde-section-hatch" width="3" height="3" patternUnits="userSpaceOnUse">
+                      <rect x="0" y="0" width="3" height="3" fill="var(--section-ground-fill)" />
                     </pattern>
                     <clipPath id="sonde-section-clip">
                       <rect x="52" y="12" width="752" height="240" />
                     </clipPath>
                   </defs>
                   {(() => {
+                    const svgWidth = 820
+                    const svgHeight = 300
                     const left = 52
                     const right = 16
                     const top = 12
                     const bottom = 48
-                    const width = 820 - left - right
-                    const height = 300 - top - bottom
+                    const width = svgWidth - left - right
+                    const height = svgHeight - top - bottom
                     const maxD = sectionProfile[sectionProfile.length - 1].distanceM
                     const minGround = sectionStats?.min ?? 0
                     const maxGround = sectionStats?.max ?? 1
@@ -1954,15 +2234,23 @@ export default function App() {
                       return workingProfile[0].elevationM
                     }
                     const trunc = (s: string) => (s.length > 20 ? `${s.slice(0, 17)}...` : s)
+                    console.log('=== SVG RENDER ===')
+                    console.log('points count:', points.length)
+                    console.log('buildings count:', sectionBuildings.length)
+                    console.log('svgWidth:', svgWidth)
+                    console.log('svgHeight:', svgHeight)
+                    console.log('first point:', points[0])
+                    console.log('last point:', points[points.length - 1])
                     return (
                       <>
-                        <rect x={left} y={top} width={width} height={height} fill="none" stroke="#111111" strokeWidth="0.9" />
+                        <rect x="10" y="10" width="100" height="50" fill="red" opacity="0.5" />
+                        <rect x={left} y={top} width={width} height={height} fill="none" stroke="var(--section-axis)" strokeWidth="0.9" />
                         {Array.from({ length: xTicks + 1 }, (_, i) => i * xStep).map((d) => {
                           const x = left + (d / Math.max(1, maxD)) * width
                           return (
                             <g key={`xt-${d}`}>
-                              <line x1={x} y1={top + height} x2={x} y2={top + height + 6} stroke="#111111" strokeWidth="0.8" />
-                              <text x={x} y={top + height + 18} textAnchor="middle" fill="#111111" fontSize="8" className="sonde-svg-text">
+                              <line x1={x} y1={top + height} x2={x} y2={top + height + 6} stroke="var(--section-axis)" strokeWidth="0.8" />
+                              <text x={x} y={top + height + 18} textAnchor="middle" fill="var(--section-text)" fontSize="8" className="sonde-svg-text">
                                 {d}
                               </text>
                             </g>
@@ -1972,9 +2260,9 @@ export default function App() {
                           const y = yScale(elev)
                           return (
                             <g key={`yt-${elev}`}>
-                              <line x1={left - 6} y1={y} x2={left} y2={y} stroke="#111111" strokeWidth="0.8" />
-                              <line x1={left} y1={y} x2={left + width} y2={y} stroke="#111111" strokeWidth="0.25" strokeDasharray="2 3" />
-                              <text x={left - 10} y={y + 3} textAnchor="end" fill="#111111" fontSize="8" className="sonde-svg-text">
+                              <line x1={left - 6} y1={y} x2={left} y2={y} stroke="var(--section-axis)" strokeWidth="0.8" />
+                              <line x1={left} y1={y} x2={left + width} y2={y} stroke="var(--section-grid)" strokeWidth="0.25" strokeDasharray="2 3" />
+                              <text x={left - 10} y={y + 3} textAnchor="end" fill="var(--section-text)" fontSize="8" className="sonde-svg-text">
                                 {elev.toFixed(1)}
                               </text>
                             </g>
@@ -1993,12 +2281,20 @@ export default function App() {
                             <g key={`bld-cut-${i}`}>
                               {bld.context ? (
                                 <>
-                                  <rect x={Math.min(x1, x2)} y={yTop} width={Math.max(1, Math.abs(x2 - x1))} height={Math.max(1, yBase - yTop)} fill="none" stroke="#999999" strokeWidth="0.5" />
+                                  <rect x={Math.min(x1, x2)} y={yTop} width={Math.max(1, Math.abs(x2 - x1))} height={Math.max(1, yBase - yTop)} fill="none" stroke="var(--section-context-stroke)" strokeWidth="0.5" />
                                 </>
                               ) : (
                                 <>
-                                  <rect x={Math.min(x1, x2)} y={yTop} width={Math.max(1, Math.abs(x2 - x1))} height={Math.max(1, yBase - yTop)} fill="#111111" />
-                                  <text x={(x1 + x2) / 2} y={Math.max(top + 8, Math.min(top + height - 6, yLabel))} textAnchor="middle" fill="#111111" fontSize="9" className="sonde-svg-text">
+                                  <rect
+                                    x={Math.min(x1, x2)}
+                                    y={yTop}
+                                    width={Math.max(1, Math.abs(x2 - x1))}
+                                    height={Math.max(1, yBase - yTop)}
+                                    fill="var(--section-building-fill)"
+                                    stroke="var(--section-building-stroke)"
+                                    strokeWidth="var(--section-building-stroke-width)"
+                                  />
+                                  <text x={(x1 + x2) / 2} y={Math.max(top + 8, Math.min(top + height - 6, yLabel))} textAnchor="middle" fill="var(--section-text)" fontSize="9" className="sonde-svg-text">
                                     {trunc(bld.label)}
                                   </text>
                                 </>
@@ -2006,32 +2302,32 @@ export default function App() {
                             </g>
                           )
                         })}
-                        <polyline points={points.join(' ')} fill="none" stroke="#111111" strokeWidth="2" />
-                        <circle cx={start.split(',')[0]} cy={start.split(',')[1]} r="3.2" fill="#FFFFFF" stroke="#111111" strokeWidth="1" />
-                        <circle cx={end.split(',')[0]} cy={end.split(',')[1]} r="3.2" fill="#FFFFFF" stroke="#111111" strokeWidth="1" />
+                        <polyline points={points.join(' ')} fill="none" stroke="var(--section-ground-line)" strokeWidth="var(--section-ground-line-width)" />
+                        <circle cx={start.split(',')[0]} cy={start.split(',')[1]} r="3.2" fill="#E8621A" stroke="#ffffff" strokeWidth="1" />
+                        <circle cx={end.split(',')[0]} cy={end.split(',')[1]} r="3.2" fill="#E8621A" stroke="#ffffff" strokeWidth="1" />
                         </g>
-                        <text x={polyPts[0].x - 8} y={polyPts[0].y - 6} fill="#111111" fontSize="10" className="sonde-svg-text">
+                        <text x={polyPts[0].x - 8} y={polyPts[0].y - 6} fill="var(--section-text)" fontSize="10" className="sonde-svg-text">
                           A
                         </text>
-                        <text x={polyPts[polyPts.length - 1].x + 6} y={polyPts[polyPts.length - 1].y - 6} fill="#111111" fontSize="10" className="sonde-svg-text">
+                        <text x={polyPts[polyPts.length - 1].x + 6} y={polyPts[polyPts.length - 1].y - 6} fill="var(--section-text)" fontSize="10" className="sonde-svg-text">
                           B
                         </text>
-                        <text x={left + width / 2} y={296} textAnchor="middle" fill="#111111" fontSize="8.5" className="sonde-svg-text">
+                        <text x={left + width / 2} y={296} textAnchor="middle" fill="var(--section-text)" fontSize="8.5" className="sonde-svg-text">
                           Distance (m, 10 m markers)
                         </text>
-                        <line x1={left + 10} y1={286} x2={left + 70} y2={286} stroke="#111111" strokeWidth="1.2" />
-                        <line x1={left + 10} y1={283} x2={left + 10} y2={289} stroke="#111111" strokeWidth="1" />
-                        <line x1={left + 70} y1={283} x2={left + 70} y2={289} stroke="#111111" strokeWidth="1" />
-                        <text x={left + 40} y={282} textAnchor="middle" fill="#111111" fontSize="7.5" className="sonde-svg-text">
+                        <line x1={left + 10} y1={286} x2={left + 70} y2={286} stroke="var(--section-axis)" strokeWidth="1.2" />
+                        <line x1={left + 10} y1={283} x2={left + 10} y2={289} stroke="var(--section-axis)" strokeWidth="1" />
+                        <line x1={left + 70} y1={283} x2={left + 70} y2={289} stroke="var(--section-axis)" strokeWidth="1" />
+                        <text x={left + 40} y={282} textAnchor="middle" fill="var(--section-text)" fontSize="7.5" className="sonde-svg-text">
                           Scale bar
                         </text>
-                        <line x1={left + width - 34} y1={276} x2={left + width - 34} y2={260} stroke="#111111" strokeWidth="1" />
-                        <polygon points={`${left + width - 34},256 ${left + width - 38},262 ${left + width - 30},262`} fill="#111111" />
-                        <text x={left + width - 24} y={267} fill="#111111" fontSize="8" className="sonde-svg-text">N</text>
-                        <text x={left + 2} y={290} textAnchor="start" fill="#111111" fontSize="8" className="sonde-svg-text">
+                        <line x1={left + width - 34} y1={276} x2={left + width - 34} y2={260} stroke="var(--section-axis)" strokeWidth="1" />
+                        <polygon points={`${left + width - 34},256 ${left + width - 38},262 ${left + width - 30},262`} fill="var(--section-axis)" />
+                        <text x={left + width - 24} y={267} fill="var(--section-text)" fontSize="8" className="sonde-svg-text">N</text>
+                        <text x={left + 2} y={290} textAnchor="start" fill="var(--section-text)" fontSize="8" className="sonde-svg-text">
                           {site ? `${site.address} · ${new Date().toISOString().slice(0, 10)}` : ''}
                         </text>
-                        <text x={left + width - 2} y={290} textAnchor="end" fill="#111111" fontSize="8" className="sonde-svg-text">
+                        <text x={left + width - 2} y={290} textAnchor="end" fill="var(--section-text)" fontSize="8" className="sonde-svg-text">
                           {`Section looking ${sectionView.current} · datum ${yMinWorld.toFixed(1)}m`}
                         </text>
                         <text
@@ -2039,7 +2335,7 @@ export default function App() {
                           y={top + height / 2}
                           transform={`rotate(-90 14 ${top + height / 2})`}
                           textAnchor="middle"
-                          fill="#111111"
+                          fill="var(--section-text)"
                           fontSize="8.5"
                           className="sonde-svg-text"
                         >
@@ -2069,10 +2365,17 @@ export default function App() {
               </p>
             )}
           </section>
+          </ModuleErrorBoundary>
           <section className="sonde-panel-wrap" aria-live="polite">
             {panel}
           </section>
         </main>
+      </div>
+      <div className="sonde-service-indicator sonde-mono" aria-live="polite">
+        <span className={`sonde-status-dot sonde-status-dot--${serviceTone}`} />
+        <span>
+          {`Mapbox ${serviceMark(mapboxStatus)} · Claude ${serviceMark(claudeStatus)} · OSM ${serviceMark(osmStatus)}`}
+        </span>
       </div>
     </div>
   )

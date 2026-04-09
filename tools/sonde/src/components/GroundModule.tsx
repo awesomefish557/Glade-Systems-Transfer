@@ -1,52 +1,10 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { useGroundData } from '../hooks/useGroundData'
-import type { GroundData, SiteLocation } from '../types'
+import type { SiteLocation } from '../types'
 
-function ragLabel(rag: 'green' | 'amber' | 'red'): string {
-  return rag === 'green' ? '🟢' : rag === 'amber' ? '🟡' : '🔴'
-}
-
-function summaryRows(data: GroundData): string[] {
-  return [
-    `Terrain: ${data.dtmAodM?.toFixed(1) ?? '—'}m AOD · Slope ${data.slopePct50m?.toFixed(1) ?? '—'}%`,
-    `Geology: ${data.superficialType} over ${data.bedrockType}`,
-    `Bearing: ${ragLabel(data.bearing.rag)} ${data.bearing.classLabel} (~${data.bearing.capacityKpa} kPa)`,
-    `Movement: ${ragLabel(data.movementRag)} ${data.movementMeanMmYr?.toFixed(1) ?? '—'} mm/yr ${data.movementClassification.toLowerCase()}`,
-    `Made Ground: ${data.madeGroundDetected ? '⚠ Possible' : 'Not detected'}`,
-    'Flood Risk: See flood tab',
-  ]
-}
-
-function MovementMiniChart({ series }: { series: GroundData['movementSeries'] }) {
-  if (!series.length) return <p className="sonde-hint">No EGMS time series returned for this point set.</p>
-  const w = 540
-  const h = 130
-  const m = 22
-  const min = Math.min(...series.map((p) => p.displacementMm))
-  const max = Math.max(...series.map((p) => p.displacementMm))
-  const span = Math.max(1, max - min)
-  const path = series
-    .map((p, i) => {
-      const x = m + (i / Math.max(1, series.length - 1)) * (w - m * 2)
-      const y = h - m - ((p.displacementMm - min) / span) * (h - m * 2)
-      return `${i === 0 ? 'M' : 'L'} ${x} ${y}`
-    })
-    .join(' ')
-  return (
-    <svg viewBox={`0 0 ${w} ${h}`} className="sonde-svg" role="img" aria-label="Ground movement time series">
-      <rect x={m} y={m} width={w - m * 2} height={h - m * 2} fill="none" stroke="#4a4640" />
-      <path d={path} fill="none" stroke="#E8621A" strokeWidth="1.8" />
-      <text x={8} y={14} className="sonde-svg-text" fontSize="8" fill="#8a8378">
-        mm
-      </text>
-      <text x={m} y={h - 4} className="sonde-svg-text" fontSize="8" fill="#8a8378">
-        {series[0]?.label}
-      </text>
-      <text x={w - m} y={h - 4} textAnchor="end" className="sonde-svg-text" fontSize="8" fill="#8a8378">
-        {series[series.length - 1]?.label}
-      </text>
-    </svg>
-  )
+function postcodeFromAddress(address: string): string {
+  const m = address.match(/[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}/i)
+  return m ? m[0].toUpperCase().replace(/\s+/, ' ') : ''
 }
 
 export function GroundModule({ site }: { site: SiteLocation | null }) {
@@ -54,11 +12,6 @@ export function GroundModule({ site }: { site: SiteLocation | null }) {
   const state = useGroundData(site, refreshKey)
 
   const data = state.status === 'ok' ? state.data : null
-  const movementLabel = useMemo(() => {
-    if (!data || !Number.isFinite(data.movementMeanMmYr)) return '— mm/year'
-    const v = data.movementMeanMmYr as number
-    return `${v > 0 ? '+' : ''}${v.toFixed(1)} mm/year`
-  }, [data])
 
   if (!site) {
     return (
@@ -89,13 +42,18 @@ export function GroundModule({ site }: { site: SiteLocation | null }) {
     )
   }
 
-  const ampHigh = Number.isFinite(data.seasonalAmplitudeMm) && (data.seasonalAmplitudeMm as number) > 5
+  const postcode = postcodeFromAddress(site.address)
+  const isCardiff = /^CF/i.test(postcode)
+  const bgsUrl = `https://map.bgs.ac.uk/bgs_views/do_detail.html?lat=${site.lat}&lng=${site.lng}`
+  const epcUrl = postcode
+    ? `https://find-energy-certificate.service.gov.uk/find-a-certificate/search-by-postcode?postcode=${encodeURIComponent(postcode)}`
+    : 'https://find-energy-certificate.service.gov.uk'
   return (
     <div className="sonde-panel">
       <header className="sonde-panel-head">
         <h2>Ground</h2>
         <p className="sonde-panel-sub">
-          Ground data from BGS and EGMS Copernicus service. Indicative only — always commission ground investigation before detailed design or planning.
+          Browser-safe fallback mode: direct BGS/EGMS/EPC APIs are CORS-restricted, so this module provides links and indicative notes.
         </p>
       </header>
 
@@ -105,84 +63,24 @@ export function GroundModule({ site }: { site: SiteLocation | null }) {
         </button>
       </div>
 
-      <h3 className="sonde-subhead">GROUND CONDITIONS SUMMARY</h3>
-      <div className="sonde-risk sonde-risk--med">
-        {summaryRows(data).map((line, idx) => (
-          <span key={idx} className="sonde-risk-val">{line}</span>
-        ))}
-      </div>
-
-      <div className="sonde-card-grid">
-        <article className="sonde-card">
-          <h3>LiDAR Terrain</h3>
-          <ul className="sonde-flood-list">
-            <li><span className="sonde-flood-title">Ground elevation</span><span className="sonde-flood-sub">{data.dtmAodM?.toFixed(2) ?? '—'} m AOD</span></li>
-            <li><span className="sonde-flood-title">DSM-DTM building height</span><span className="sonde-flood-sub">{data.buildingHeightM?.toFixed(2) ?? '—'} m</span></li>
-            <li><span className="sonde-flood-title">Terrain slope (50m)</span><span className="sonde-flood-sub">{data.slopePct50m?.toFixed(2) ?? '—'}%</span></li>
-            <li><span className="sonde-flood-title">Surveyed</span><span className="sonde-flood-sub">{data.surveyedDate ?? 'unknown'}</span></li>
-          </ul>
-        </article>
-
-        <article className="sonde-card">
-          <h3>Superficial Deposits</h3>
-          <ul className="sonde-flood-list">
-            <li><span className="sonde-flood-title">Type</span><span className="sonde-flood-sub">{data.superficialType}</span></li>
-            <li><span className="sonde-flood-title">Thickness</span><span className="sonde-flood-sub">{data.superficialThickness ?? 'n/a'}</span></li>
-            <li><span className="sonde-flood-title">Engineering description</span><span className="sonde-flood-sub">{data.superficialEngineering ?? 'n/a'}</span></li>
-          </ul>
-        </article>
-
-        <article className="sonde-card">
-          <h3>Bedrock Geology</h3>
-          <ul className="sonde-flood-list">
-            <li><span className="sonde-flood-title">Rock type</span><span className="sonde-flood-sub">{data.bedrockType}</span></li>
-            <li><span className="sonde-flood-title">Age / formation</span><span className="sonde-flood-sub">{data.bedrockAge ?? 'n/a'}</span></li>
-            <li><span className="sonde-flood-title">Depth to bedrock</span><span className="sonde-flood-sub">{data.depthToBedrock ?? 'n/a'}</span></li>
-          </ul>
-        </article>
-      </div>
-
-      {data.madeGroundDetected ? (
-        <div className="sonde-risk sonde-risk--high" style={{ marginTop: 12 }}>
-          <span className="sonde-risk-label">⚠ Made Ground Detected</span>
-          <span className="sonde-risk-val">This site may contain disturbed or filled material. Contamination screening and ground investigation strongly recommended before design.</span>
-        </div>
-      ) : null}
-
-      <h3 className="sonde-subhead">Bearing Capacity Estimate</h3>
-      <div className={`sonde-risk ${data.bearing.rag === 'green' ? 'sonde-risk--low' : data.bearing.rag === 'amber' ? 'sonde-risk--med' : 'sonde-risk--high'}`}>
-        <span className="sonde-risk-label">{ragLabel(data.bearing.rag)} {data.bearing.classLabel}</span>
-        <span className="sonde-risk-val">{data.bearing.capacityKpa} kPa</span>
-        <span className="sonde-risk-meta">{data.bearing.rationale}</span>
-      </div>
-
-      <h3 className="sonde-subhead">Ground Movement</h3>
-      <div className={`sonde-risk ${data.movementRag === 'green' ? 'sonde-risk--low' : data.movementRag === 'amber' ? 'sonde-risk--med' : 'sonde-risk--high'}`}>
-        <span className="sonde-risk-label">{ragLabel(data.movementRag)} {data.movementClassification}</span>
-        <span className="sonde-risk-val">{movementLabel}</span>
-        <span className="sonde-risk-meta">Measurement points: {data.movementPoints} · Date range: {data.movementDateRange ?? 'n/a'}</span>
-      </div>
-      <p className="sonde-hint">Mean subsidence rate uses EGMS nearby points (negative = subsidence, positive = uplift).</p>
-      {ampHigh ? (
-        <div className="sonde-risk sonde-risk--high" style={{ marginTop: 8 }}>
-          <span className="sonde-risk-label">⚠ Significant seasonal movement detected.</span>
-          <span className="sonde-risk-val">Likely shrink-swell clay. Foundation depth is critical.</span>
-        </div>
-      ) : null}
-      <MovementMiniChart series={data.movementSeries} />
-
-      <h3 className="sonde-subhead">Borehole Records (500m)</h3>
+      <h3 className="sonde-subhead">Ground data links</h3>
       <ul className="sonde-flood-list">
-        {data.boreholes.length ? data.boreholes.map((b) => (
-          <li key={b.id}>
-            <span className="sonde-flood-title">{b.id} · {Math.round(b.distanceM)}m away</span>
-            <span className="sonde-flood-sub">Depth: {b.depthM?.toFixed(1) ?? 'n/a'}m · Date: {b.date ?? 'n/a'} · <a href={b.url} target="_blank" rel="noreferrer">BGS borehole viewer</a></span>
-          </li>
-        )) : <li><span className="sonde-flood-sub">No boreholes returned.</span></li>}
+        <li><span className="sonde-flood-title">BGS geology viewer</span><span className="sonde-flood-sub"><a href={bgsUrl} target="_blank" rel="noreferrer">{bgsUrl}</a></span></li>
+        <li><span className="sonde-flood-title">EGMS viewer</span><span className="sonde-flood-sub"><a href="https://egms.land.copernicus.eu" target="_blank" rel="noreferrer">https://egms.land.copernicus.eu</a></span></li>
+        <li><span className="sonde-flood-title">EPC register</span><span className="sonde-flood-sub"><a href={epcUrl} target="_blank" rel="noreferrer">{epcUrl}</a></span></li>
       </ul>
-      <p className="sonde-hint">Nearby borehole data may indicate ground conditions at this site.</p>
-
-      <h3 className="sonde-subhead">DESIGN IMPLICATIONS</h3>
+      {isCardiff ? (
+        <div className="sonde-risk sonde-risk--med" style={{ marginTop: 12 }}>
+          <span className="sonde-risk-label">Cardiff baseline (indicative)</span>
+          <span className="sonde-risk-val">South Wales Coal Measures</span>
+          <span className="sonde-risk-val">Alluvial clay superficial deposits</span>
+          <span className="sonde-risk-val">Moderate bearing capacity ~100 kPa</span>
+          <span className="sonde-risk-meta">Check BGS viewer for site-specific data.</span>
+        </div>
+      ) : (
+        <p className="sonde-hint">Generic UK mode active. Use the links above for authoritative, site-specific ground and EPC information.</p>
+      )}
+      <h3 className="sonde-subhead">Design implications</h3>
       <ul className="sonde-flood-list">
         {data.designImplications.length
           ? data.designImplications.map((x, i) => <li key={i}><span className="sonde-flood-sub">- {x}</span></li>)

@@ -4,7 +4,7 @@ export async function fetchJsonSafe<T>(url: string, init?: RequestInit): Promise
   try {
     const run = async () => {
       const res = await fetch(url, init)
-      if (res.status === 429 && url.includes('overpass-api.de')) {
+      if (res.status === 429 && (url.includes('/api/interpreter') || url.includes('overpass-api.de'))) {
         await new Promise((resolve) => setTimeout(resolve, 15_000))
         return fetch(url, init)
       }

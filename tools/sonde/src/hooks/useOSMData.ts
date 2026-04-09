@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { OSMBuilding, OSMPlanData, OSMRoad, OSMTree, OSMWoodland, SiteLocation } from '../types'
 import { cacheGet, cacheKey, cacheSet } from '../utils/sessionCache'
+import { queryOverpass } from '../utils/overpass'
 
 type OsmJson = {
   elements?: Array<{
@@ -12,10 +13,6 @@ type OsmJson = {
     lon?: number
     nodes?: number[]
   }>
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function buildNodes(elements: OsmJson['elements']): Map<number, [number, number]> {
@@ -120,34 +117,8 @@ async function fetchOverpass(lat: number, lng: number, radiusM: number): Promise
 );
 out geom;
 `
-  const runOnce = async (): Promise<OSMPlanData> => {
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 95_000)
-    try {
-      const res = await fetch('https://overpass-api.de/api/interpreter', {
-        method: 'POST',
-        body: q,
-        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
-        signal: controller.signal,
-      })
-      if (!res.ok) throw new Error(`Overpass ${res.status}`)
-      const json = (await res.json()) as OsmJson
-      return parseOverpass(json)
-    } finally {
-      clearTimeout(timeout)
-    }
-  }
-
-  try {
-    return await runOnce()
-  } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : String(e)
-    const isTimeout = e instanceof DOMException && e.name === 'AbortError'
-    const is504 = message.includes('Overpass 504')
-    if (!isTimeout && !is504) throw e
-    await sleep(15_000)
-    return runOnce()
-  }
+  const json = await queryOverpass<OsmJson>(q, 2)
+  return parseOverpass(json)
 }
 
 export type OSMFetchState =
@@ -162,7 +133,7 @@ export function useOSMData(site: SiteLocation | null, radiusM: number): OSMFetch
   const [state, setState] = useState<OSMFetchState>({ status: 'idle' })
 
   useEffect(() => {
-    if (!site || (site.lat === 0 && site.lng === 0)) {
+    if (!site?.lat || site.lat === 0) {
       setState({ status: 'idle' })
       return
     }

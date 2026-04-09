@@ -4,7 +4,7 @@ import { buildSolarSummary } from '../utils/sunCalc'
 
 export function useSolarData(site: SiteLocation | null): SolarSummary | null {
   return useMemo(() => {
-    if (!site) return null
+    if (!site?.lat || site.lat === 0) return null
     return buildSolarSummary(site.lat, site.lng)
   }, [site?.lat, site?.lng])
 }

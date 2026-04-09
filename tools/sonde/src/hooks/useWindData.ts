@@ -61,7 +61,7 @@ export function useWindData(site: SiteLocation | null): WindFetchState {
   const [state, setState] = useState<WindFetchState>({ status: 'idle' })
 
   useEffect(() => {
-    if (!site) {
+    if (!site?.lat || site.lat === 0) {
       setState({ status: 'idle' })
       return
     }

@@ -16,7 +16,7 @@ export type DemographicsFetchState = GenericState<DemographicsData>
 export function useDemographicsData(site: SiteLocation | null): DemographicsFetchState {
   const [state, setState] = useState<DemographicsFetchState>({ status: 'idle' })
   useEffect(() => {
-    if (!site) return void setState({ status: 'idle' })
+    if (!site?.lat || site.lat === 0) return void setState({ status: 'idle' })
     const pseudoCode = `OA-${Math.abs(Math.round(site.lat * 1000))}-${Math.abs(Math.round(site.lng * 1000))}`
     const key = cacheKey('demographics', [pseudoCode])
     const cached = cacheGet<DemographicsData>(key)

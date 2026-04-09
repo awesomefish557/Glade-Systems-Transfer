@@ -21,7 +21,7 @@ function postcodeFromAddress(address: string): string {
 export function usePlanningData(site: SiteLocation | null): PlanningFetchState {
   const [state, setState] = useState<PlanningFetchState>({ status: 'idle' })
   useEffect(() => {
-    if (!site) return void setState({ status: 'idle' })
+    if (!site?.lat || site.lat === 0) return void setState({ status: 'idle' })
     const key = cacheKey('planning', [site.lat.toFixed(4), site.lng.toFixed(4)])
     const cached = cacheGet<PlanningData>(key)
     if (cached) return void setState({ status: 'ok', data: cached })

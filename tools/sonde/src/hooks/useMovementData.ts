@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { MovementData, SiteLocation } from '../types'
 import { cacheGet, cacheKey, cacheSet } from '../utils/sessionCache'
 import { circlePolygon, distanceFromSite, fetchJsonSafe } from '../utils/moduleHelpers'
+import { overpassBaseUrl, queryOverpass } from '../utils/overpass'
 
 type GenericState<T> =
   | { status: 'idle' }
@@ -16,7 +17,7 @@ export type MovementFetchState = GenericState<MovementData>
 export function useMovementData(site: SiteLocation | null): MovementFetchState {
   const [state, setState] = useState<MovementFetchState>({ status: 'idle' })
   useEffect(() => {
-    if (!site) return void setState({ status: 'idle' })
+    if (!site?.lat || site.lat === 0) return void setState({ status: 'idle' })
     const key = cacheKey('movement', [site.lat.toFixed(4), site.lng.toFixed(4)])
     const cached = cacheGet<MovementData>(key)
     if (cached) return void setState({ status: 'ok', data: cached })
@@ -29,11 +30,7 @@ export function useMovementData(site: SiteLocation | null): MovementFetchState {
       const walkLive = token ? await fetchJsonSafe<GeoJSON.FeatureCollection>(walkUrl) : null
       const cycleLive = token ? await fetchJsonSafe<GeoJSON.FeatureCollection>(cycleUrl) : null
       const overpassQ = `[out:json][timeout:45];(node["highway"="bus_stop"](around:500,${site.lat},${site.lng});way["highway"="cycleway"](around:500,${site.lat},${site.lng}););out geom;`
-      const osm = await fetchJsonSafe<OverpassResp>('https://overpass-api.de/api/interpreter', {
-        method: 'POST',
-        body: overpassQ,
-        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
-      })
+      const osm = await queryOverpass<OverpassResp>(overpassQ)
       const busStops = (osm?.elements ?? [])
         .filter((e) => e['type'] === 'node' && e['lat'] != null && e['lon'] != null)
         .slice(0, 24)
@@ -99,7 +96,7 @@ export function useMovementData(site: SiteLocation | null): MovementFetchState {
         ],
         sources: [
           { label: 'Mapbox Isochrone', url: 'https://docs.mapbox.com/api/navigation/isochrone/', mode: walkLive ? 'partial' : 'fallback' },
-          { label: 'Overpass OSM', url: 'https://overpass-api.de/', mode: osm ? 'partial' : 'fallback' },
+          { label: 'Overpass OSM', url: overpassBaseUrl(), mode: osm ? 'partial' : 'fallback' },
         ],
       }
       if (cancelled) return

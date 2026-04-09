@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { ClimateData, ClimateMonthPoint, SiteLocation } from '../types'
 import { cacheGet, cacheKey, cacheSet } from '../utils/sessionCache'
+import { proxied } from '../utils/proxy'
 
 const MONTH_LABELS = [
   'Jan',
@@ -77,7 +78,7 @@ export function useClimateData(site: SiteLocation | null): ClimateFetchState {
   const [state, setState] = useState<ClimateFetchState>({ status: 'idle' })
 
   useEffect(() => {
-    if (!site) {
+    if (!site?.lat || site.lat === 0) {
       setState({ status: 'idle' })
       return
     }
@@ -111,7 +112,7 @@ export function useClimateData(site: SiteLocation | null): ClimateFetchState {
 
     ;(async () => {
       try {
-        const res = await fetch(buildUrl())
+        const res = await fetch(proxied(buildUrl()))
         if (!res.ok) {
           if (!cancelled) setState({ status: 'error', message: `Climate API ${res.status}` })
           return

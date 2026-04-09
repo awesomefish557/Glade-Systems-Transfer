@@ -33,6 +33,7 @@ import { useOSMData } from './hooks/useOSMData'
 import { usePlanningData } from './hooks/usePlanningData'
 import { useSolarData } from './hooks/useSolarData'
 import { useWindData } from './hooks/useWindData'
+import { getOverpassSourceStatus, subscribeOverpassSource } from './utils/overpass'
 import { azimuthSouthToNorthDeg } from './utils/sunCalc'
 import type { ModuleId, SavedSite, SiteLocation, StatusTone } from './types'
 
@@ -76,6 +77,7 @@ const ROOF_CONTOUR_LAYER_ID = 'sonde-roof-contours-line'
 const HISTORICAL_SOURCE_ID = 'sonde-historical-source'
 const HISTORICAL_LAYER_ID = 'sonde-historical-layer'
 const SAVED_SITES_KEY = 'sonde_saved_sites'
+const BASIC_3D_BUILDINGS_ONLY = true
 const DEFAULT_SITE: SiteLocation = {
   lat: 51.4914,
   lng: -3.1819,
@@ -280,7 +282,7 @@ function toneForModule(
       return 'amber'
     case 'ground':
       if (ground.status === 'ok') return 'green'
-      if (ground.status === 'error') return 'red'
+      if (ground.status === 'error') return 'amber'
       return 'amber'
     case 'lasercut':
       if (osm.status === 'ok') return 'green'
@@ -383,6 +385,11 @@ export default function App() {
   const [is3DView, setIs3DView] = useState(false)
   const [shadowDayIndex, setShadowDayIndex] = useState(dayIndexFromDate(new Date()))
   const [shadowDayProgress, setShadowDayProgress] = useState(500)
+  const [shadowAnimating, setShadowAnimating] = useState(false)
+  const [dfWindowW, setDfWindowW] = useState(2.4)
+  const [dfWindowH, setDfWindowH] = useState(1.8)
+  const [dfRoomDepth, setDfRoomDepth] = useState(6)
+  const [dfObstructionDeg, setDfObstructionDeg] = useState(28)
   const [sectionMode, setSectionMode] = useState(false)
   const [sectionPoints, setSectionPoints] = useState<SectionPoint[]>([])
   const [sectionProfile, setSectionProfile] = useState<ElevationSample[] | null>(null)
@@ -455,22 +462,7 @@ export default function App() {
     map.on('load', () => {
       map.resize()
       setMapLoaded(true)
-      // 1) Terrain source
-      if (!map.getSource('dem')) {
-        map.addSource('dem', {
-          type: 'raster-dem',
-          url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
-          tileSize: 512,
-        })
-      }
-      if (!map.getSource(TERRAIN_SOURCE_ID)) {
-        map.addSource(TERRAIN_SOURCE_ID, {
-          type: 'raster-dem',
-          url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
-          tileSize: 512,
-        })
-      }
-      // 2) Base 3D buildings from Mapbox vector tiles
+      // Basic fallback: only native Mapbox 3D buildings.
       if (!map.getLayer(MAPBOX_BUILDING_LAYER_ID) && map.getSource('composite')) {
         map.addLayer({
           id: MAPBOX_BUILDING_LAYER_ID,
@@ -481,36 +473,28 @@ export default function App() {
           minzoom: 14,
           paint: {
             'fill-extrusion-color': '#aaaaaa',
-            'fill-extrusion-height': ['interpolate', ['linear'], ['zoom'], 15, 0, 15.05, ['get', 'height']],
-            'fill-extrusion-base': ['interpolate', ['linear'], ['zoom'], 15, 0, 15.05, ['get', 'min_height']],
+            'fill-extrusion-height': ['get', 'height'],
+            'fill-extrusion-base': ['get', 'min_height'],
             'fill-extrusion-opacity': 0.9,
-          },
-        })
-      }
-      // 3) Site building highlight layer (filter updated after site/viewport updates)
-      if (!map.getLayer(SITE_BUILDING_LAYER_ID) && map.getSource('composite')) {
-        map.addLayer({
-          id: SITE_BUILDING_LAYER_ID,
-          source: 'composite',
-          'source-layer': 'building',
-          filter: ['all', ['==', 'extrude', 'true'], ['==', ['id'], -1]],
-          type: 'fill-extrusion',
-          minzoom: 14,
-          paint: {
-            'fill-extrusion-color': '#E8621A',
-            'fill-extrusion-height': ['coalesce', ['feature-state', 'height'], ['get', 'height'], 8],
-            'fill-extrusion-base': ['coalesce', ['get', 'min_height'], 0],
-            'fill-extrusion-opacity': 0.95,
           },
         })
       }
     })
     map.on('style.load', () => {
-      if (!map.getSource(TERRAIN_SOURCE_ID)) {
-        map.addSource(TERRAIN_SOURCE_ID, {
-          type: 'raster-dem',
-          url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
-          tileSize: 512,
+      if (!map.getLayer(MAPBOX_BUILDING_LAYER_ID) && map.getSource('composite')) {
+        map.addLayer({
+          id: MAPBOX_BUILDING_LAYER_ID,
+          source: 'composite',
+          'source-layer': 'building',
+          filter: ['==', 'extrude', 'true'],
+          type: 'fill-extrusion',
+          minzoom: 14,
+          paint: {
+            'fill-extrusion-color': '#aaaaaa',
+            'fill-extrusion-height': ['get', 'height'],
+            'fill-extrusion-base': ['get', 'min_height'],
+            'fill-extrusion-opacity': 0.9,
+          },
         })
       }
       setMapLoaded(true)
@@ -803,6 +787,37 @@ export default function App() {
     }
   }, [site, shadowDayIndex, shadowDayProgress])
 
+  const selectedShadowDateTime = useMemo(() => shadowState?.time ?? null, [shadowState])
+
+  const buildShadowFeatureCollection = useCallback(
+    (at: Date): GeoJSON.FeatureCollection => {
+      if (!site || osm.status !== 'ok') return { type: 'FeatureCollection', features: [] }
+      const sun = SunCalc.getPosition(at, site.lat, site.lng)
+      if (sun.altitude <= 0) return { type: 'FeatureCollection', features: [] }
+      const shadowBearingRad = sun.azimuth + Math.PI
+      const shadowBearingDeg = ((shadowBearingRad * 180) / Math.PI + 360) % 360
+      const features: GeoJSON.Feature[] = []
+      for (const b of osm.data.buildings.slice(0, 240)) {
+        const ring = b.rings[0]
+        if (!ring || ring.length < 4) continue
+        const c = centroidLatLng(ring)
+        const key = buildingHeightKey(c.lat, c.lng)
+        const h = lidarHeightsByKey[key] ?? b.heightM ?? (b.levels ? b.levels * 3 : 6)
+        const shadowLength = Math.max(0, h / Math.tan(sun.altitude))
+        const base = ring.map(([lat, lng]) => [lng, lat] as [number, number])
+        const shadowPts = base.map(([lng, lat]) => projectLngLatMeters(lng, lat, shadowBearingDeg, shadowLength))
+        const poly: [number, number][] = [...base, ...shadowPts.reverse(), base[0]]
+        features.push({
+          type: 'Feature',
+          properties: { h },
+          geometry: { type: 'Polygon', coordinates: [poly] },
+        })
+      }
+      return { type: 'FeatureCollection', features }
+    },
+    [site, osm, lidarHeightsByKey]
+  )
+
   const sectionDistanceM = useMemo(() => {
     if (sectionPoints.length < 2) return 0
     return haversineM(
@@ -941,16 +956,18 @@ export default function App() {
       console.log(`Section: A=[${start.lat}, ${start.lng}] B=[${end.lat}, ${end.lng}]`)
       const distanceM = Math.max(1, haversineM(start.lat, start.lng, end.lat, end.lng))
       console.log(`Section: total distance = ${distanceM.toFixed(0)}m`)
-      const demSource = 'mapbox-terrain-dem-v1'
-      if (!map.getSource(demSource)) {
-        map.addSource(demSource, {
-          type: 'raster-dem',
-          url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
-          tileSize: 512,
-        })
+      if (!BASIC_3D_BUILDINGS_ONLY) {
+        const demSource = 'mapbox-terrain-dem-v1'
+        if (!map.getSource(demSource)) {
+          map.addSource(demSource, {
+            type: 'raster-dem',
+            url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
+            tileSize: 512,
+          })
+        }
+        map.setTerrain({ source: demSource, exaggeration: 1 })
+        console.log('Section: terrain enabled, waiting for idle...')
       }
-      map.setTerrain({ source: demSource, exaggeration: 1 })
-      console.log('Section: terrain enabled, waiting for idle...')
       map.once('idle', () => {
         const lngA = start.lng
         const latA = start.lat
@@ -993,7 +1010,8 @@ export default function App() {
   useEffect(() => {
     const map = mapRef.current
     if (!map || !mapLoaded) return
-    map.getCanvas().style.cursor = sectionMode ? 'crosshair' : ''
+    const canvas = map.getCanvas()
+    if (canvas) canvas.style.cursor = sectionMode ? 'crosshair' : ''
     if (!sectionMode) return
     const onClick = (e: mapboxgl.MapMouseEvent) => {
       const pt = { lng: e.lngLat.lng, lat: e.lngLat.lat }
@@ -1014,11 +1032,13 @@ export default function App() {
     map.on('click', onClick)
     return () => {
       map.off('click', onClick)
-      map.getCanvas().style.cursor = ''
+      const cleanupCanvas = map.getCanvas()
+      if (cleanupCanvas) cleanupCanvas.style.cursor = ''
     }
   }, [mapLoaded, rebuildSectionProfile, sectionMode])
 
   useEffect(() => {
+    if (BASIC_3D_BUILDINGS_ONLY) return
     if (!site || osm.status !== 'ok' || !lidarHeightsEnabled) return
     let cancelled = false
     const buildings = osm.data.buildings
@@ -1121,6 +1141,7 @@ export default function App() {
   }, [site, osm, lidarHeightsByKey, lidarByBuilding, lidarHeightsEnabled])
 
   useEffect(() => {
+    if (BASIC_3D_BUILDINGS_ONLY) return
     const map = mapRef.current
     if (!map || !mapLoaded || !site || osm.status !== 'ok') return
     const features: GeoJSON.Feature[] = osm.data.buildings
@@ -1178,6 +1199,7 @@ export default function App() {
   }, [is3DView, mapLoaded, osm, site, lidarHeightsByKey, lidarHeightsEnabled])
 
   useEffect(() => {
+    if (BASIC_3D_BUILDINGS_ONLY) return
     const map = mapRef.current
     if (!map || !mapLoaded || !site || !map.getLayer(SITE_BUILDING_LAYER_ID)) return
     const updateSiteBuildingFilter = () => {
@@ -1199,6 +1221,7 @@ export default function App() {
   }, [mapLoaded, site])
 
   useEffect(() => {
+    if (BASIC_3D_BUILDINGS_ONLY) return
     const map = mapRef.current
     if (!map || !mapLoaded || !is3DView || !lidarHeightsEnabled || !map.getSource('composite')) return
     Object.values(lidarByBuilding).forEach((bld) => {
@@ -1216,6 +1239,7 @@ export default function App() {
   }, [mapLoaded, is3DView, lidarHeightsEnabled, lidarByBuilding])
 
   useEffect(() => {
+    if (BASIC_3D_BUILDINGS_ONLY) return
     const map = mapRef.current
     if (!map || !mapLoaded || osm.status !== 'ok') return
     const popup = new mapboxgl.Popup({ closeButton: true, closeOnClick: true })
@@ -1248,6 +1272,7 @@ export default function App() {
   }, [mapLoaded, osm, lidarHeightsByKey])
 
   useEffect(() => {
+    if (BASIC_3D_BUILDINGS_ONLY) return
     const map = mapRef.current
     if (!map || !mapLoaded || !site || osm.status !== 'ok') return
     if (!treesEnabled) {
@@ -1345,9 +1370,13 @@ export default function App() {
     if (map.getLayer(TREE_TRUNK_LAYER_ID)) map.setLayoutProperty(TREE_TRUNK_LAYER_ID, 'visibility', is3DView ? 'visible' : 'none')
     if (map.getLayer(TREE_CANOPY_LAYER_ID)) map.setLayoutProperty(TREE_CANOPY_LAYER_ID, 'visibility', is3DView ? 'visible' : 'none')
     const popup = new mapboxgl.Popup({ closeButton: false, closeOnClick: false })
-    const onEnter = () => (map.getCanvas().style.cursor = 'pointer')
+    const onEnter = () => {
+      const canvas = map.getCanvas()
+      if (canvas) canvas.style.cursor = 'pointer'
+    }
     const onLeave = () => {
-      map.getCanvas().style.cursor = ''
+      const canvas = map.getCanvas()
+      if (canvas) canvas.style.cursor = ''
       popup.remove()
     }
     const onMove = (e: mapboxgl.MapLayerMouseEvent) => {
@@ -1373,28 +1402,10 @@ export default function App() {
   }, [treesEnabled, mapLoaded, site, osm, is3DView])
 
   useEffect(() => {
+    if (BASIC_3D_BUILDINGS_ONLY) return
     const map = mapRef.current
-    if (!map || !mapLoaded || !site || osm.status !== 'ok' || !shadowState) return
-    const altitude = Math.max(0.5, shadowState.altitude)
-    const shadowBearing = (shadowState.azimuthFromNorth + 180) % 360
-    const features: GeoJSON.Feature[] = []
-    for (const b of osm.data.buildings.slice(0, 200)) {
-      const ring = b.rings[0]
-      if (!ring || ring.length < 4) continue
-      const c = centroidLatLng(ring)
-      const key = buildingHeightKey(c.lat, c.lng)
-      const h = lidarHeightsByKey[key] ?? b.heightM ?? (b.levels ? b.levels * 3 : 6)
-      const shadowLen = h / Math.tan((altitude * Math.PI) / 180)
-      const base = ring.map(([lat, lng]) => [lng, lat] as [number, number])
-      const top = base.map(([lng, lat]) => projectLngLatMeters(lng, lat, shadowBearing, shadowLen))
-      const poly: [number, number][] = [...base, ...top.reverse(), base[0]]
-      features.push({
-        type: 'Feature',
-        properties: { h },
-        geometry: { type: 'Polygon', coordinates: [poly] },
-      })
-    }
-    const fc: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features }
+    if (!map || !mapLoaded || !selectedShadowDateTime) return
+    const fc = buildShadowFeatureCollection(selectedShadowDateTime)
     if (!map.getSource(SHADOW_SOURCE_ID)) map.addSource(SHADOW_SOURCE_ID, { type: 'geojson', data: fc })
     else (map.getSource(SHADOW_SOURCE_ID) as mapboxgl.GeoJSONSource).setData(fc)
     if (!map.getLayer(SHADOW_LAYER_ID)) {
@@ -1404,16 +1415,17 @@ export default function App() {
         source: SHADOW_SOURCE_ID,
         paint: {
           'fill-color': '#000000',
-          'fill-opacity': 0.4,
+          'fill-opacity': 0.45,
         },
       })
     }
-    map.setLayoutProperty(SHADOW_LAYER_ID, 'visibility', is3DView ? 'visible' : 'none')
+    map.setLayoutProperty(SHADOW_LAYER_ID, 'visibility', 'visible')
     setMapPipelineStatus('Loading: buildings ✓ · trees ✓ · shadows ✓')
     setMapPipelineUpdatedAt(new Date())
-  }, [mapLoaded, site, osm, shadowState, lidarHeightsByKey, is3DView])
+  }, [mapLoaded, selectedShadowDateTime, buildShadowFeatureCollection])
 
   useEffect(() => {
+    if (BASIC_3D_BUILDINGS_ONLY) return
     const map = mapRef.current
     if (!map || !mapLoaded || !site || osm.status !== 'ok') return
     if (!roofContoursEnabled) {
@@ -1567,6 +1579,13 @@ export default function App() {
   useEffect(() => {
     const map = mapRef.current
     if (!map || !mapLoaded) return
+    if (BASIC_3D_BUILDINGS_ONLY) {
+      if (map.getLayer(MAPBOX_BUILDING_LAYER_ID)) {
+        map.setLayoutProperty(MAPBOX_BUILDING_LAYER_ID, 'visibility', is3DView ? 'visible' : 'none')
+      }
+      map.easeTo({ pitch: is3DView ? 45 : 0, bearing: map.getBearing(), duration: 450 })
+      return
+    }
     if (is3DView) {
       map.setTerrain({ source: TERRAIN_SOURCE_ID, exaggeration: 1.5 })
       map.easeTo({ pitch: 45, duration: 650 })
@@ -1716,6 +1735,170 @@ export default function App() {
     [site]
   )
 
+  const applyShadowNow = useCallback(() => {
+    if (!site) return
+    const now = new Date()
+    const year = now.getFullYear()
+    const date = new Date(year, now.getMonth(), now.getDate(), 12, 0, 0, 0)
+    const times = SunCalc.getTimes(date, site.lat, site.lng)
+    const target = now.getTime()
+    const sunrise = times.sunrise.getTime()
+    const sunset = times.sunset.getTime()
+    const pct = clamp(((target - sunrise) / Math.max(1, sunset - sunrise)) * 1000, 0, 1000)
+    setShadowDayIndex(dayIndexFromDate(date))
+    setShadowDayProgress(Math.round(pct))
+  }, [site])
+
+  useEffect(() => {
+    if (!shadowAnimating || !site || !shadowState) return
+    const id = window.setInterval(() => {
+      setShadowDayProgress((prev) => {
+        const next = prev + 30 * (1000 / 720)
+        if (next >= 1000) {
+          setShadowAnimating(false)
+          return 1000
+        }
+        return next
+      })
+    }, 150)
+    return () => window.clearInterval(id)
+  }, [shadowAnimating, site, shadowState])
+
+  const shadowSummary = useMemo(() => {
+    if (!site || osm.status !== 'ok') return null
+    const mkDate = (month: number, day: number, hour: number) => new Date(new Date().getFullYear(), month - 1, day, hour, 0, 0, 0)
+    const sampleHours = (month: number, day: number, dirDeg: number) => {
+      let lit = 0
+      let checked = 0
+      for (let h = 8; h <= 17; h += 1) {
+        const d = mkDate(month, day, h)
+        const sun = SunCalc.getPosition(d, site.lat, site.lng)
+        if (sun.altitude <= 0) continue
+        checked += 1
+        const p = projectLngLatMeters(site.lng, site.lat, dirDeg, 20)
+        const fc = buildShadowFeatureCollection(d)
+        const inShadow = fc.features.some((f) => {
+          const ring = (f.geometry as GeoJSON.Polygon).coordinates?.[0] as [number, number][] | undefined
+          return ring ? pointInPolygon([p[0], p[1]], ring) : false
+        })
+        if (!inShadow) lit += 1
+      }
+      return checked ? lit : 0
+    }
+    return {
+      southSummer: sampleHours(6, 21, 180),
+      southWinter: sampleHours(12, 21, 180),
+      northSummer: sampleHours(6, 21, 0),
+      northWinter: sampleHours(12, 21, 0),
+    }
+  }, [site, osm, buildShadowFeatureCollection])
+
+  const daylightFactor = useMemo(() => {
+    const area = Math.max(0.5, dfWindowW * dfWindowH)
+    const roomFactor = Math.max(1, dfRoomDepth * 3)
+    const obstructionFactor = Math.max(0.05, Math.cos((Math.min(85, Math.max(0, dfObstructionDeg)) * Math.PI) / 180))
+    const df = (area / roomFactor) * 20 * obstructionFactor
+    const rag = df > 3 ? 'green' : df >= 1 ? 'amber' : 'red'
+    return { value: df, rag, nurseryPass: df >= 3 }
+  }, [dfWindowW, dfWindowH, dfRoomDepth, dfObstructionDeg])
+
+  const shadowStudyData = useMemo(() => {
+    if (!site || osm.status !== 'ok') return null
+    const year = new Date().getFullYear()
+    const mk = (m: number, d: number, h: number) => new Date(year, m - 1, d, h, 0, 0, 0)
+    const summerDates = [mk(6, 21, 9), mk(6, 21, 12), mk(6, 21, 15)]
+    const winterDates = [mk(12, 21, 9), mk(12, 21, 12), mk(12, 21, 15)]
+    const toLocal = (lng: number, lat: number) => {
+      const x = (lng - site.lng) * 111320 * Math.cos((site.lat * Math.PI) / 180)
+      const y = (lat - site.lat) * 111320
+      return { x, y }
+    }
+    const gridStep = 10
+    const cells: Array<{ x: number; y: number; summer: number; winter: number; spring: number; solar: number }> = []
+    for (let y = -radiusM; y <= radiusM; y += gridStep) {
+      for (let x = -radiusM; x <= radiusM; x += gridStep) {
+        if (Math.hypot(x, y) > radiusM) continue
+        const lng = site.lng + x / (111320 * Math.cos((site.lat * Math.PI) / 180))
+        const lat = site.lat + y / 111320
+        const p: [number, number] = [lng, lat]
+        const countLit = (month: number, day: number) => {
+          let lit = 0
+          for (let h = 8; h <= 17; h += 1) {
+            const d = mk(month, day, h)
+            const sun = SunCalc.getPosition(d, site.lat, site.lng)
+            if (sun.altitude <= 0) continue
+            const fc = buildShadowFeatureCollection(d)
+            const shaded = fc.features.some((f) => {
+              const ring = (f.geometry as GeoJSON.Polygon).coordinates?.[0] as [number, number][] | undefined
+              return ring ? pointInPolygon(p, ring) : false
+            })
+            if (!shaded) lit += 1
+          }
+          return lit
+        }
+        const summer = countLit(6, 21)
+        const winter = countLit(12, 21)
+        const spring = countLit(3, 21)
+        const solar = Math.max(0, (summer * 1.2 + spring + winter * 0.8) / 3)
+        cells.push({ x, y, summer, winter, spring, solar })
+      }
+    }
+    const calendar: Array<{ month: number; hour: number; state: 'sun' | 'shadow' | 'night' }> = []
+    for (let month = 1; month <= 12; month += 1) {
+      for (let hour = 0; hour < 24; hour += 1) {
+        const d = new Date(year, month - 1, 21, hour, 0, 0, 0)
+        const sun = SunCalc.getPosition(d, site.lat, site.lng)
+        if (sun.altitude <= 0) {
+          calendar.push({ month, hour, state: 'night' })
+          continue
+        }
+        const fc = buildShadowFeatureCollection(d)
+        const shaded = fc.features.some((f) => {
+          const ring = (f.geometry as GeoJSON.Polygon).coordinates?.[0] as [number, number][] | undefined
+          return ring ? pointInPolygon([site.lng, site.lat], ring) : false
+        })
+        calendar.push({ month, hour, state: shaded ? 'shadow' : 'sun' })
+      }
+    }
+    const rangePoly = (d: Date) =>
+      buildShadowFeatureCollection(d).features.map((f) =>
+        ((f.geometry as GeoJSON.Polygon).coordinates?.[0] ?? []).map(([lng, lat]) => toLocal(lng, lat))
+      )
+    const svf = (() => {
+      const samples = 36
+      let blocked = 0
+      for (let i = 0; i < samples; i += 1) {
+        const bearing = (i / samples) * 360
+        const p = projectLngLatMeters(site.lng, site.lat, bearing, radiusM)
+        const lineA: [number, number] = [site.lng, site.lat]
+        const lineB: [number, number] = [p[0], p[1]]
+        let maxAngle = 0
+        for (const b of osm.data.buildings) {
+          const ring = b.rings[0]?.map(([lat, lng]) => [lng, lat] as [number, number])
+          if (!ring || ring.length < 2) continue
+          const c = centroidLatLng(b.rings[0])
+          const key = buildingHeightKey(c.lat, c.lng)
+          const h = lidarHeightsByKey[key] ?? b.heightM ?? (b.levels ? b.levels * 3 : 6)
+          for (let j = 0; j < ring.length - 1; j += 1) {
+            const t = segmentIntersectionT(lineA, lineB, ring[j], ring[j + 1])
+            if (t == null) continue
+            const dist = Math.max(1, t * radiusM)
+            maxAngle = Math.max(maxAngle, Math.atan(h / dist))
+          }
+        }
+        if (maxAngle > (15 * Math.PI) / 180) blocked += 1
+      }
+      return 1 - blocked / samples
+    })()
+    return {
+      cells,
+      calendar,
+      summerRange: summerDates.map(rangePoly),
+      winterRange: winterDates.map(rangePoly),
+      svf,
+    }
+  }, [site, osm, radiusM, lidarHeightsByKey, buildShadowFeatureCollection])
+
   const wrapModule = (moduleName: string, node: ReactElement) => (
     <ModuleErrorBoundary moduleName={moduleName}>{node}</ModuleErrorBoundary>
   )
@@ -1808,6 +1991,14 @@ export default function App() {
 
   const mapboxStatus: ServiceStatus = token && mapLoaded ? 'ok' : 'error'
   const osmStatus: ServiceStatus = osm.status === 'ok' ? 'ok' : osm.status === 'error' ? 'error' : 'loading'
+  const [overpassSource, setOverpassSource] = useState(() => getOverpassSourceStatus())
+  useEffect(() => subscribeOverpassSource(() => setOverpassSource(getOverpassSourceStatus())), [])
+  const overpassLabel =
+    overpassSource.mode === 'own'
+      ? 'own server ✓'
+      : overpassSource.mode === 'public'
+        ? 'public API (fallback)'
+        : 'initialising'
   const allServicesOk = mapboxStatus === 'ok' && claudeStatus === 'ok' && osmStatus === 'ok'
   const anyServiceError = mapboxStatus === 'error' || claudeStatus === 'error' || osmStatus === 'error'
   const serviceTone = allServicesOk ? 'green' : anyServiceError ? 'red' : 'amber'
@@ -2050,7 +2241,7 @@ export default function App() {
                 </span>
               </label>
               <label className="sonde-label sonde-label--precision">
-                Solar time
+                Time (sunrise → sunset)
                 <input
                   type="range"
                   min={0}
@@ -2066,6 +2257,11 @@ export default function App() {
                 </span>
               </label>
             </div>
+            <p className="sonde-hint sonde-mono">
+              {shadowState
+                ? `${shadowState.date.toLocaleDateString([], { day: '2-digit', month: 'short' })} · ${shadowState.time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · Alt: ${shadowState.altitude.toFixed(0)}° · Azi: ${shadowState.azimuthFromNorth.toFixed(0)}°`
+                : '—'}
+            </p>
 
             <div className="sonde-preset-row">
               <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(6, 21, 9)} disabled={!site}>
@@ -2086,7 +2282,121 @@ export default function App() {
               <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(12, 21, 15)} disabled={!site}>
                 Winter 15:00
               </button>
+              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(3, 21, 12)} disabled={!site}>
+                Spring 12:00
+              </button>
+              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(9, 21, 12)} disabled={!site}>
+                Autumn 12:00
+              </button>
+              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={applyShadowNow} disabled={!site}>
+                Now
+              </button>
+              <button type="button" className={`sonde-btn ${shadowAnimating ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`} onClick={() => setShadowAnimating(true)} disabled={!site || shadowAnimating}>
+                ▶ Play
+              </button>
+              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => setShadowAnimating(false)} disabled={!shadowAnimating}>
+                ■ Stop
+              </button>
             </div>
+
+            {shadowStudyData ? (
+              <div className="sonde-panel" style={{ marginTop: 10 }}>
+                <h3 className="sonde-subhead">Shadow Analysis</h3>
+                <div className="sonde-card-grid">
+                  <article className="sonde-card">
+                    <h4>Sunlight Hours Map</h4>
+                    <svg id="sonde-svg-sunlight-hours" viewBox="0 0 220 220" className="sonde-svg">
+                      <rect x="0" y="0" width="220" height="220" fill="#111" />
+                      {shadowStudyData.cells.map((c, i) => {
+                        const x = 110 + (c.x / Math.max(1, radiusM)) * 100
+                        const y = 110 - (c.y / Math.max(1, radiusM)) * 100
+                        const s = Math.max(0, Math.min(1, c.summer / 10))
+                        const r = Math.round(255 * (1 - s))
+                        const g = Math.round(200 * s + 30)
+                        return <rect key={`sun-cell-${i}`} x={x - 2} y={y - 2} width={4} height={4} fill={`rgb(${r},${g},60)`} />
+                      })}
+                      <circle cx="110" cy="110" r="100" fill="none" stroke="#555" />
+                    </svg>
+                  </article>
+                  <article className="sonde-card">
+                    <h4>Shadow Range (Summer/Winter)</h4>
+                    <svg id="sonde-svg-shadow-range-summer" viewBox="0 0 220 220" className="sonde-svg">
+                      <rect x="0" y="0" width="220" height="220" fill="#111" />
+                      {shadowStudyData.summerRange.map((set, k) =>
+                        set.map((poly, i) => (
+                          <polygon
+                            key={`sum-${k}-${i}`}
+                            points={poly.map((p) => `${110 + (p.x / Math.max(1, radiusM)) * 90},${110 - (p.y / Math.max(1, radiusM)) * 90}`).join(' ')}
+                            fill={k === 0 ? '#777' : k === 1 ? '#555' : '#333'}
+                            stroke="none"
+                          />
+                        ))
+                      )}
+                    </svg>
+                    <svg id="sonde-svg-shadow-range-winter" viewBox="0 0 220 220" className="sonde-svg" style={{ marginTop: 6 }}>
+                      <rect x="0" y="0" width="220" height="220" fill="#111" />
+                      {shadowStudyData.winterRange.map((set, k) =>
+                        set.map((poly, i) => (
+                          <polygon
+                            key={`win-${k}-${i}`}
+                            points={poly.map((p) => `${110 + (p.x / Math.max(1, radiusM)) * 90},${110 - (p.y / Math.max(1, radiusM)) * 90}`).join(' ')}
+                            fill={k === 0 ? '#777' : k === 1 ? '#555' : '#333'}
+                            stroke="none"
+                          />
+                        ))
+                      )}
+                    </svg>
+                  </article>
+                  <article className="sonde-card">
+                    <h4>Annual Shadow Calendar</h4>
+                    <svg id="sonde-svg-shadow-calendar" viewBox="0 0 300 160" className="sonde-svg">
+                      <rect x="0" y="0" width="300" height="160" fill="#111" />
+                      {shadowStudyData.calendar.map((c) => {
+                        const x = 20 + c.hour * 11
+                        const y = 10 + (c.month - 1) * 12
+                        const fill = c.state === 'night' ? '#000' : c.state === 'shadow' ? '#777' : '#f1d66a'
+                        return <rect key={`cal-${c.month}-${c.hour}`} x={x} y={y} width={10} height={10} fill={fill} />
+                      })}
+                    </svg>
+                  </article>
+                  <article className="sonde-card">
+                    <h4>Sky View Factor + Daylight</h4>
+                    <svg id="sonde-svg-svf" viewBox="0 0 220 220" className="sonde-svg">
+                      <rect x="0" y="0" width="220" height="220" fill="#111" />
+                      <circle cx="110" cy="110" r="90" fill="#f1d66a" stroke="#333" />
+                      <circle cx="110" cy="110" r={90 * (1 - shadowStudyData.svf)} fill="#1f1f1f" />
+                      <text x="110" y="114" textAnchor="middle" fill="#fff" className="sonde-svg-text" fontSize="12">{`SVF: ${shadowStudyData.svf.toFixed(2)}`}</text>
+                    </svg>
+                    <div className="sonde-map-tools-grid">
+                      <label className="sonde-label">Window w(m)<input type="number" value={dfWindowW} onChange={(e) => setDfWindowW(Number(e.target.value) || 0)} /></label>
+                      <label className="sonde-label">Window h(m)<input type="number" value={dfWindowH} onChange={(e) => setDfWindowH(Number(e.target.value) || 0)} /></label>
+                      <label className="sonde-label">Room depth(m)<input type="number" value={dfRoomDepth} onChange={(e) => setDfRoomDepth(Number(e.target.value) || 0)} /></label>
+                      <label className="sonde-label">Obstruction °<input type="number" value={dfObstructionDeg} onChange={(e) => setDfObstructionDeg(Number(e.target.value) || 0)} /></label>
+                    </div>
+                    <p className="sonde-hint">{`Estimated Daylight Factor: ${daylightFactor.value.toFixed(2)}% · ${daylightFactor.rag === 'green' ? '🟢' : daylightFactor.rag === 'amber' ? '🟡' : '🔴'} · Nursery 3%: ${daylightFactor.nurseryPass ? 'Yes' : 'No'}`}</p>
+                  </article>
+                  <article className="sonde-card">
+                    <h4>Solar Radiation Heatmap</h4>
+                    <svg id="sonde-svg-solar-radiation" viewBox="0 0 220 220" className="sonde-svg">
+                      <rect x="0" y="0" width="220" height="220" fill="#111" />
+                      {shadowStudyData.cells.map((c, i) => {
+                        const x = 110 + (c.x / Math.max(1, radiusM)) * 100
+                        const y = 110 - (c.y / Math.max(1, radiusM)) * 100
+                        const s = Math.max(0, Math.min(1, c.solar / 10))
+                        const r = Math.round(255 * s)
+                        const b = Math.round(220 * (1 - s))
+                        return <rect key={`rad-cell-${i}`} x={x - 2} y={y - 2} width={4} height={4} fill={`rgb(${r},120,${b})`} />
+                      })}
+                    </svg>
+                  </article>
+                </div>
+                {shadowSummary ? (
+                  <p className="sonde-hint">
+                    {`South facade: ${shadowSummary.southSummer.toFixed(1)}hrs sun in summer, ${shadowSummary.southWinter.toFixed(1)}hrs in winter · North facade: ${shadowSummary.northSummer.toFixed(1)}hrs summer, ${shadowSummary.northWinter.toFixed(1)}hrs winter`}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
 
             {sectionProfile && sectionProfile.length > 1 ? (
               <div className="sonde-section-profile">
@@ -2124,36 +2434,24 @@ export default function App() {
                   className="sonde-svg"
                   role="img"
                   aria-label="Terrain elevation profile"
+                  color="white"
                   style={
-                    sectionPreviewTheme === 'dark'
-                      ? {
-                          '--section-bg': '#111111',
-                          '--section-ground-fill': '#222222',
-                          '--section-ground-line': '#ffffff',
-                          '--section-ground-line-width': '2',
-                          '--section-building-fill': '#444444',
-                          '--section-building-stroke': '#ffffff',
-                          '--section-building-stroke-width': '0.5',
-                          '--section-text': '#ffffff',
-                          '--section-grid': '#222222',
-                          '--section-context-stroke': '#555555',
-                          '--section-axis': '#ffffff',
-                          fontFamily: 'monospace',
-                        } as CSSProperties
-                      : {
-                          '--section-bg': '#ffffff',
-                          '--section-ground-fill': '#eeeeee',
-                          '--section-ground-line': '#111111',
-                          '--section-ground-line-width': '2',
-                          '--section-building-fill': '#333333',
-                          '--section-building-stroke': '#333333',
-                          '--section-building-stroke-width': '0',
-                          '--section-text': '#111111',
-                          '--section-grid': '#111111',
-                          '--section-context-stroke': '#777777',
-                          '--section-axis': '#111111',
-                          fontFamily: 'monospace',
-                        } as CSSProperties
+                    {
+                      '--section-bg': '#111111',
+                      '--section-ground-fill': '#2a2a2a',
+                      '--section-ground-line': '#ffffff',
+                      '--section-ground-line-width': '2',
+                      '--section-building-fill': '#555555',
+                      '--section-building-stroke': '#ffffff',
+                      '--section-building-stroke-width': '0.5',
+                      '--section-text': '#ffffff',
+                      '--section-grid': '#444444',
+                      '--section-context-stroke': '#555555',
+                      '--section-axis': '#ffffff',
+                      color: '#ffffff',
+                      background: '#111111',
+                      fontFamily: 'monospace',
+                    } as CSSProperties
                   }
                 >
                   <rect width="100%" height="100%" fill="var(--section-bg)" />
@@ -2234,6 +2532,18 @@ export default function App() {
                       return workingProfile[0].elevationM
                     }
                     const trunc = (s: string) => (s.length > 20 ? `${s.slice(0, 17)}...` : s)
+                    const sectionColours = {
+                      background: '#111111',
+                      text: '#ffffff',
+                      terrainStroke: '#ffffff',
+                      terrainStrokeWidth: 2,
+                      groundFill: '#2a2a2a',
+                      buildingFill: '#555555',
+                      buildingStroke: '#ffffff',
+                      buildingStrokeWidth: 0.5,
+                      abDot: '#E8621A',
+                    }
+                    console.log('Section colours:', sectionColours)
                     console.log('=== SVG RENDER ===')
                     console.log('points count:', points.length)
                     console.log('buildings count:', sectionBuildings.length)
@@ -2243,14 +2553,13 @@ export default function App() {
                     console.log('last point:', points[points.length - 1])
                     return (
                       <>
-                        <rect x="10" y="10" width="100" height="50" fill="red" opacity="0.5" />
                         <rect x={left} y={top} width={width} height={height} fill="none" stroke="var(--section-axis)" strokeWidth="0.9" />
                         {Array.from({ length: xTicks + 1 }, (_, i) => i * xStep).map((d) => {
                           const x = left + (d / Math.max(1, maxD)) * width
                           return (
                             <g key={`xt-${d}`}>
                               <line x1={x} y1={top + height} x2={x} y2={top + height + 6} stroke="var(--section-axis)" strokeWidth="0.8" />
-                              <text x={x} y={top + height + 18} textAnchor="middle" fill="var(--section-text)" fontSize="8" className="sonde-svg-text">
+                              <text x={x} y={top + height + 18} textAnchor="middle" fill="#ffffff" fontSize="8" className="sonde-svg-text">
                                 {d}
                               </text>
                             </g>
@@ -2261,15 +2570,15 @@ export default function App() {
                           return (
                             <g key={`yt-${elev}`}>
                               <line x1={left - 6} y1={y} x2={left} y2={y} stroke="var(--section-axis)" strokeWidth="0.8" />
-                              <line x1={left} y1={y} x2={left + width} y2={y} stroke="var(--section-grid)" strokeWidth="0.25" strokeDasharray="2 3" />
-                              <text x={left - 10} y={y + 3} textAnchor="end" fill="var(--section-text)" fontSize="8" className="sonde-svg-text">
+                              <line x1={left} y1={y} x2={left + width} y2={y} stroke="#444444" strokeWidth="0.5" strokeDasharray="2 3" />
+                              <text x={left - 10} y={y + 3} textAnchor="end" fill="#ffffff" fontSize="8" className="sonde-svg-text">
                                 {elev.toFixed(1)}
                               </text>
                             </g>
                           )
                         })}
                         <g clipPath="url(#sonde-section-clip)">
-                        <path d={groundClosedPath} fill="url(#sonde-section-hatch)" stroke="none" />
+                        <path d={groundClosedPath} fill="#2a2a2a" stroke="none" />
                         {sectionBuildings.map((bld, i) => {
                           const x1 = sectionFlip ? distToX(maxD - bld.endM) : distToX(bld.startM)
                           const x2 = sectionFlip ? distToX(maxD - bld.startM) : distToX(bld.endM)
@@ -2294,7 +2603,7 @@ export default function App() {
                                     stroke="var(--section-building-stroke)"
                                     strokeWidth="var(--section-building-stroke-width)"
                                   />
-                                  <text x={(x1 + x2) / 2} y={Math.max(top + 8, Math.min(top + height - 6, yLabel))} textAnchor="middle" fill="var(--section-text)" fontSize="9" className="sonde-svg-text">
+                                  <text x={(x1 + x2) / 2} y={Math.max(top + 8, Math.min(top + height - 6, yLabel))} textAnchor="middle" fill="#ffffff" fontSize="9" className="sonde-svg-text">
                                     {trunc(bld.label)}
                                   </text>
                                 </>
@@ -2302,32 +2611,32 @@ export default function App() {
                             </g>
                           )
                         })}
-                        <polyline points={points.join(' ')} fill="none" stroke="var(--section-ground-line)" strokeWidth="var(--section-ground-line-width)" />
+                        <polyline points={points.join(' ')} fill="none" stroke="#ffffff" strokeWidth={2} />
                         <circle cx={start.split(',')[0]} cy={start.split(',')[1]} r="3.2" fill="#E8621A" stroke="#ffffff" strokeWidth="1" />
                         <circle cx={end.split(',')[0]} cy={end.split(',')[1]} r="3.2" fill="#E8621A" stroke="#ffffff" strokeWidth="1" />
                         </g>
-                        <text x={polyPts[0].x - 8} y={polyPts[0].y - 6} fill="var(--section-text)" fontSize="10" className="sonde-svg-text">
+                        <text x={polyPts[0].x - 8} y={polyPts[0].y - 6} fill="#E8621A" fontSize="10" className="sonde-svg-text">
                           A
                         </text>
-                        <text x={polyPts[polyPts.length - 1].x + 6} y={polyPts[polyPts.length - 1].y - 6} fill="var(--section-text)" fontSize="10" className="sonde-svg-text">
+                        <text x={polyPts[polyPts.length - 1].x + 6} y={polyPts[polyPts.length - 1].y - 6} fill="#E8621A" fontSize="10" className="sonde-svg-text">
                           B
                         </text>
-                        <text x={left + width / 2} y={296} textAnchor="middle" fill="var(--section-text)" fontSize="8.5" className="sonde-svg-text">
+                        <text x={left + width / 2} y={296} textAnchor="middle" fill="#ffffff" fontSize="8.5" className="sonde-svg-text">
                           Distance (m, 10 m markers)
                         </text>
                         <line x1={left + 10} y1={286} x2={left + 70} y2={286} stroke="var(--section-axis)" strokeWidth="1.2" />
                         <line x1={left + 10} y1={283} x2={left + 10} y2={289} stroke="var(--section-axis)" strokeWidth="1" />
                         <line x1={left + 70} y1={283} x2={left + 70} y2={289} stroke="var(--section-axis)" strokeWidth="1" />
-                        <text x={left + 40} y={282} textAnchor="middle" fill="var(--section-text)" fontSize="7.5" className="sonde-svg-text">
+                        <text x={left + 40} y={282} textAnchor="middle" fill="#ffffff" fontSize="7.5" className="sonde-svg-text">
                           Scale bar
                         </text>
                         <line x1={left + width - 34} y1={276} x2={left + width - 34} y2={260} stroke="var(--section-axis)" strokeWidth="1" />
                         <polygon points={`${left + width - 34},256 ${left + width - 38},262 ${left + width - 30},262`} fill="var(--section-axis)" />
-                        <text x={left + width - 24} y={267} fill="var(--section-text)" fontSize="8" className="sonde-svg-text">N</text>
-                        <text x={left + 2} y={290} textAnchor="start" fill="var(--section-text)" fontSize="8" className="sonde-svg-text">
+                        <text x={left + width - 24} y={267} fill="#ffffff" fontSize="8" className="sonde-svg-text">N</text>
+                        <text x={left + 2} y={290} textAnchor="start" fill="#ffffff" fontSize="8" className="sonde-svg-text">
                           {site ? `${site.address} · ${new Date().toISOString().slice(0, 10)}` : ''}
                         </text>
-                        <text x={left + width - 2} y={290} textAnchor="end" fill="var(--section-text)" fontSize="8" className="sonde-svg-text">
+                        <text x={left + width - 2} y={290} textAnchor="end" fill="#ffffff" fontSize="8" className="sonde-svg-text">
                           {`Section looking ${sectionView.current} · datum ${yMinWorld.toFixed(1)}m`}
                         </text>
                         <text
@@ -2335,7 +2644,7 @@ export default function App() {
                           y={top + height / 2}
                           transform={`rotate(-90 14 ${top + height / 2})`}
                           textAnchor="middle"
-                          fill="var(--section-text)"
+                          fill="#ffffff"
                           fontSize="8.5"
                           className="sonde-svg-text"
                         >
@@ -2374,7 +2683,7 @@ export default function App() {
       <div className="sonde-service-indicator sonde-mono" aria-live="polite">
         <span className={`sonde-status-dot sonde-status-dot--${serviceTone}`} />
         <span>
-          {`Mapbox ${serviceMark(mapboxStatus)} · Claude ${serviceMark(claudeStatus)} · OSM ${serviceMark(osmStatus)}`}
+          {`Mapbox ${serviceMark(mapboxStatus)} · Claude ${serviceMark(claudeStatus)} · OSM ${serviceMark(osmStatus)} (${overpassLabel})`}
         </span>
       </div>
     </div>

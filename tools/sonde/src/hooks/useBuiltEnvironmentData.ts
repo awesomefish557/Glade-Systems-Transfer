@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import type { BuiltEnvironmentData, SiteLocation } from '../types'
 import { cacheGet, cacheKey, cacheSet } from '../utils/sessionCache'
 import { fetchJsonSafe } from '../utils/moduleHelpers'
+import { overpassBaseUrl, queryOverpass } from '../utils/overpass'
+import { proxied } from '../utils/proxy'
 
 type GenericState<T> =
   | { status: 'idle' }
@@ -10,6 +12,10 @@ type GenericState<T> =
   | { status: 'ok'; data: T }
 
 type OverpassResp = { elements?: Array<Record<string, unknown>> }
+type EpcSearchResponse = {
+  rows?: Array<Record<string, unknown>>
+  results?: Array<Record<string, unknown>>
+}
 
 export type BuiltEnvironmentFetchState = GenericState<BuiltEnvironmentData>
 
@@ -21,7 +27,7 @@ function postcodeFromAddress(address: string): string {
 export function useBuiltEnvironmentData(site: SiteLocation | null): BuiltEnvironmentFetchState {
   const [state, setState] = useState<BuiltEnvironmentFetchState>({ status: 'idle' })
   useEffect(() => {
-    if (!site || (site.lat === 0 && site.lng === 0)) return void setState({ status: 'idle' })
+    if (!site?.lat || site.lat === 0) return void setState({ status: 'idle' })
     const key = cacheKey('built', [site.lat.toFixed(4), site.lng.toFixed(4)])
     const cached = cacheGet<BuiltEnvironmentData>(key)
     if (cached) return void setState({ status: 'ok', data: cached })
@@ -29,11 +35,7 @@ export function useBuiltEnvironmentData(site: SiteLocation | null): BuiltEnviron
     setState({ status: 'loading' })
     ;(async () => {
       const q = `[out:json][timeout:60];way["building"](around:500,${site.lat},${site.lng});out tags;`
-      const osm = await fetchJsonSafe<OverpassResp>('https://overpass-api.de/api/interpreter', {
-        method: 'POST',
-        body: q,
-        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
-      })
+      const osm = await queryOverpass<OverpassResp>(q)
       const buildings = osm?.elements ?? []
       const heights = buildings
         .map((b) => {
@@ -47,12 +49,42 @@ export function useBuiltEnvironmentData(site: SiteLocation | null): BuiltEnviron
       const avgHeightM = heights.length ? heights.reduce((a, b) => a + b, 0) / heights.length : undefined
 
       const postcode = postcodeFromAddress(site.address)
+      const epcApiUrl = postcode
+        ? `https://epc.opendatacommunities.org/api/v1/domestic/search?postcode=${encodeURIComponent(postcode)}&size=10`
+        : null
+      const epcApiKey = import.meta.env.VITE_EPC_API_KEY
+      const epcAuthValue = epcApiKey
+        ? `Basic ${btoa((epcApiKey.includes(':') ? epcApiKey : `email:${epcApiKey}`).trim())}`
+        : null
+      const epcApi = epcApiUrl
+        ? await fetchJsonSafe<EpcSearchResponse>(proxied(epcApiUrl), {
+            headers: epcAuthValue ? { Authorization: epcAuthValue } : undefined,
+          })
+        : null
+      const epcRows = epcApi?.rows ?? epcApi?.results ?? []
+      const insulationMentions = epcRows
+        .map((row) =>
+          [
+            row['walls-description'],
+            row['roof-description'],
+            row['floor-description'],
+            row['mainheat-description'],
+          ]
+            .filter((v) => typeof v === 'string' && v.trim())
+            .join('; ')
+        )
+        .filter(Boolean)
+      const epcSummary = epcRows.length
+        ? `EPC sample: ${epcRows.length} nearby records. Typical fabric/services: ${insulationMentions[0] ?? 'see EPC records for details'}.`
+        : epcApiKey
+          ? 'EPC API returned no nearby records for this postcode.'
+          : 'Set VITE_EPC_API_KEY to enable EPC API results.'
       const epcUrl = postcode
         ? `https://find-energy-certificate.service.gov.uk/find-a-certificate/search-by-postcode?postcode=${encodeURIComponent(postcode)}`
         : 'https://find-energy-certificate.service.gov.uk'
       const data: BuiltEnvironmentData = {
         periodSummary: 'Predominantly late-19th/early-20th-century terraces with infill development.',
-        epcSummary: 'EPC API access is browser-blocked; use the official EPC register link.',
+        epcSummary,
         avgHeightM,
         buildingCount: buildings.length,
         ageBuckets: [
@@ -64,8 +96,13 @@ export function useBuiltEnvironmentData(site: SiteLocation | null): BuiltEnviron
         ],
         heights,
         sources: [
-          { label: 'Overpass OSM', url: 'https://overpass-api.de/', mode: osm ? 'partial' : 'fallback' },
-          { label: 'Check EPC ratings', url: epcUrl, mode: 'fallback' },
+          { label: 'Overpass OSM', url: overpassBaseUrl(), mode: osm ? 'partial' : 'fallback' },
+          {
+            label: 'EPC domestic search API',
+            url: epcApiUrl ?? 'https://epc.opendatacommunities.org/',
+            mode: epcApi ? 'partial' : 'fallback',
+          },
+          { label: 'Check EPC ratings', url: epcUrl, mode: 'live' },
         ],
       }
       if (cancelled) return

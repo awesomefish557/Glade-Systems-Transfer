@@ -1,4 +1,5 @@
 import { convertorPage } from './convertorPage';
+import { handleWatchinator } from './watchinator/router';
 
 const GATE_COOKIE = 'glade_gate';
 
@@ -104,6 +105,7 @@ function gateLoginPage(next: string, showError: boolean): string {
 
 /**
  * When GLADE_GATE_PASSWORD is set, all routes require a valid gate cookie except GET/POST /gate.
+ * /watchinator/* is always public (boot HTML, assets, API) so kiosks never see the site gate.
  * Returns a Response to short-circuit, or null to continue routing.
  */
 async function enforceSiteGate(request: Request, url: URL, env: Env): Promise<Response | null> {
@@ -111,6 +113,10 @@ async function enforceSiteGate(request: Request, url: URL, env: Env): Promise<Re
   if (!pwd) return null;
 
   const path = url.pathname;
+  const normalized = path.replace(/\/+$/, '') || '/';
+  if (/^\/watchinator(\/|$)/i.test(normalized)) {
+    return null;
+  }
   const isHttps = url.protocol === 'https:';
 
   if (path === '/gate') {
@@ -359,12 +365,14 @@ export interface Env {
    * or https://delphi.gladesystems.uk. Router proxies /delphi/* here with correct Host so assets load on gladesystems.uk.
    */
   DELPHI_ORIGIN?: string;
-  /** When set, entire site (except /gate) requires password once; cookie ~30d. Prefer Dashboard secret over committing. */
+  /** When set, site requires password once (cookie ~30d) except /gate and /watchinator/*. Prefer Dashboard secret over committing. */
   GLADE_GATE_PASSWORD?: string;
   /** Seer Pages URL for /seer redirect (default https://master.seer-11i.pages.dev) */
   SEER_PAGES_ORIGIN?: string;
   /** Pinboard UI Pages origin (no trailing slash), e.g. https://convertor-release.pinboard-ui.pages.dev */
   PINBOARD_ORIGIN?: string;
+  /** Watch-inator kiosk config (D1 watchinator-db) */
+  WATCHINATOR_DB?: D1Database;
 }
 
 export default {
@@ -434,6 +442,10 @@ export default {
       return new Response(lighthousePage(), {
         headers: { 'Content-Type': 'text/html; charset=utf-8' },
       });
+    }
+
+    if (/^\/watchinator(\/|$)/i.test(path)) {
+      return handleWatchinator(request, url, env);
     }
 
     return new Response('Not found', { status: 404 });

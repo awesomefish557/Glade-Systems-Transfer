@@ -59,7 +59,7 @@ const SECTION_POINT_LAYER_ID = 'sonde-section-points'
 const TERRAIN_SOURCE_ID = 'sonde-dem'
 const OSM_BUILDING_SOURCE_ID = 'sonde-osm-buildings'
 const OSM_BUILDING_LAYER_ID = 'sonde-osm-buildings-3d'
-const MAPBOX_BUILDING_LAYER_ID = 'sonde-mapbox-buildings-3d'
+const MAPBOX_BUILDING_LAYER_ID = '3d-buildings'
 const SONDE_DYNAMIC_SOURCE_ID = 'sonde-dynamic-overlays'
 const TREE_SOURCE_ID = 'sonde-tree-points'
 const TREE_LAYER_ID = 'sonde-tree-canopy'
@@ -341,6 +341,7 @@ export default function App() {
   const [radiusM, setRadiusM] = useState(100)
   const [mapLoaded, setMapLoaded] = useState(false)
   const [is3DView, setIs3DView] = useState(false)
+  const [terrainExaggeration, setTerrainExaggeration] = useState<0 | 0.5 | 1 | 2 | 3>(1)
   const [shadowDayIndex, setShadowDayIndex] = useState(dayIndexFromDate(new Date()))
   const [shadowDayProgress, setShadowDayProgress] = useState(500)
   const [sectionMode, setSectionMode] = useState(false)
@@ -418,6 +419,16 @@ export default function App() {
         })
       }
     })
+    map.on('style.load', () => {
+      if (!map.getSource(TERRAIN_SOURCE_ID)) {
+        map.addSource(TERRAIN_SOURCE_ID, {
+          type: 'raster-dem',
+          url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
+          tileSize: 512,
+        })
+      }
+      setMapLoaded(true)
+    })
     mapRef.current = map
     setMapInstance(map)
     return () => {
@@ -428,6 +439,25 @@ export default function App() {
       setMapLoaded(false)
     }
   }, [token])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !mapLoaded) return
+    if (!map.getSource(TERRAIN_SOURCE_ID)) {
+      map.addSource(TERRAIN_SOURCE_ID, {
+        type: 'raster-dem',
+        url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
+        tileSize: 512,
+      })
+    }
+    if (is3DView) {
+      map.setTerrain({ source: TERRAIN_SOURCE_ID, exaggeration: terrainExaggeration })
+      map.easeTo({ pitch: 55, duration: 500 })
+    } else {
+      map.setTerrain(null)
+      map.easeTo({ pitch: 0, bearing: 0, duration: 350 })
+    }
+  }, [mapLoaded, is3DView, terrainExaggeration])
 
   useEffect(() => {
     const p = new URLSearchParams(window.location.search)
@@ -1033,12 +1063,12 @@ export default function App() {
         source: 'composite',
         'source-layer': 'building',
         type: 'fill-extrusion',
-        minzoom: 14.5,
+        minzoom: 14,
         paint: {
-          'fill-extrusion-color': '#3f3a33',
-          'fill-extrusion-height': ['coalesce', ['get', 'height'], 8],
+          'fill-extrusion-color': '#aaaaaa',
+          'fill-extrusion-height': ['coalesce', ['feature-state', 'height'], ['get', 'height'], 10],
           'fill-extrusion-base': ['coalesce', ['get', 'min_height'], 0],
-          'fill-extrusion-opacity': 0.5,
+          'fill-extrusion-opacity': 0.9,
         },
       })
     }
@@ -1049,6 +1079,23 @@ export default function App() {
       map.removeLayer(MAPBOX_BUILDING_LAYER_ID)
     }
   }, [is3DView, mapLoaded, osm, site, lidarHeightsByKey, lidarHeightsEnabled])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !mapLoaded || !is3DView || !lidarHeightsEnabled || !map.getSource('composite')) return
+    Object.values(lidarByBuilding).forEach((bld) => {
+      const idNum = Number(bld.buildingId)
+      const id = Number.isFinite(idNum) ? idNum : bld.buildingId
+      try {
+        map.setFeatureState(
+          { source: 'composite', sourceLayer: 'building', id: id as string | number },
+          { height: bld.maxHeight }
+        )
+      } catch {
+        // Some OSM IDs will not map to Mapbox vector-tile IDs; ignore safely.
+      }
+    })
+  }, [mapLoaded, is3DView, lidarHeightsEnabled, lidarByBuilding])
 
   useEffect(() => {
     const map = mapRef.current
@@ -1683,8 +1730,21 @@ export default function App() {
                 disabled={!mapInstance}
                 onClick={() => setIs3DView((v) => !v)}
               >
-                {is3DView ? 'Flat View' : '3D View'}
+                {is3DView ? 'Flat / 3D: 3D' : 'Flat / 3D: Flat'}
               </button>
+              <label className="sonde-label">
+                Terrain
+                <select
+                  value={terrainExaggeration}
+                  onChange={(e) => setTerrainExaggeration(Number(e.target.value) as 0 | 0.5 | 1 | 2 | 3)}
+                >
+                  <option value={0}>0x</option>
+                  <option value={0.5}>0.5x</option>
+                  <option value={1}>1x</option>
+                  <option value={2}>2x</option>
+                  <option value={3}>3x</option>
+                </select>
+              </label>
               <button
                 type="button"
                 className={`sonde-btn ${sectionMode ? 'sonde-btn--primary' : ''}`}

@@ -599,22 +599,6 @@ export default function App() {
     [casinoAccounts],
   );
 
-  const weeklyQueueTier2Unstarted = useMemo(() => {
-    const stageOf = (b: BookieRow) => {
-      const s = Number(b.onboarding_stage);
-      return Number.isFinite(s) && s >= 1 && s <= 5 ? Math.floor(s) : 1;
-    };
-    return bookies
-      .filter(
-        (b) =>
-          b.status !== "closed" &&
-          Number(b.welcome_claimed) !== 1 &&
-          stageOf(b) === 1 &&
-          bookieTierMeta(b.name)?.tier === 2,
-      )
-      .slice(0, 2);
-  }, [bookies]);
-
   const persistCasinoAccounts = useCallback((updater: (prev: CasinoAccount[]) => CasinoAccount[]) => {
     setCasinoAccounts((prev) => {
       const next = updater(prev);
@@ -1773,40 +1757,6 @@ export default function App() {
 
             {hasReadyBookie ? (
               <>
-            {new Date().getDay() === 1 && (
-              <section
-                style={{
-                  marginBottom: "1.25rem",
-                  padding: "1rem 1.1rem",
-                  background: "#1e2218",
-                  border: `1px solid ${GOLD}`,
-                  borderRadius: 10,
-                }}
-              >
-                <h3
-                  className="heading"
-                  style={{
-                    margin: "0 0 0.5rem",
-                    color: GOLD,
-                    fontSize: "0.82rem",
-                    letterSpacing: "0.14em",
-                    textTransform: "uppercase",
-                  }}
-                >
-                  This week&apos;s new accounts
-                </h3>
-                <p style={{ margin: 0, color: TEXT, fontSize: "0.9rem", lineHeight: 1.55 }}>
-                  This week&apos;s new accounts: you can open 1-2 new bookies this week. Recommended next:{" "}
-                  <strong style={{ color: GOLD }}>
-                    {weeklyQueueTier2Unstarted.length > 0
-                      ? weeklyQueueTier2Unstarted.map((b) => b.name).join(" · ")
-                      : "add Tier 2 bookies in Bookies tab, then set them in Queue"}
-                  </strong>
-                  . Remember: account creation only — no deposit until tomorrow, no bet until day after.
-                </p>
-              </section>
-            )}
-
             <section
               style={{
                 paddingBottom: "1.35rem",

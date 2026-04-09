@@ -1,0 +1,227 @@
+# WATCH-INATOR — brief.txt
+## Boot Choreography v0.2 (final+)
+
+### What it is
+A Raspberry Pi device that plugs into any screen via HDMI,
+connects to WiFi, loads one target website in fullscreen
+kiosk mode and locks to it. Controlled via QR code and
+a config webpage on your phone.
+
+---
+
+### ACT 0 — Raw Terminal
+
+Black screen. Cursor blinks on empty prompt ~1 second.
+
+`root@watchinator:~$ sudo ./launch_kiosk.sh` types itself,
+slightly uneven speed.
+
+`[sudo] password for pi:` appears. Then `*****` lands all
+at once — janky paste, not typed.
+
+Wall of terminal output dumps fast, scrolling, lots of
+[ ok ] lines rushing past. Screen fills and overflows.
+UPLOAD SUCCESSFUL. Watch-inator v0.1.0-alpha ready.
+
+Pause. Black.
+
+---
+
+### ACT 1 — The Line Appears
+
+Single green horizontal line (#00e676, 2px, soft glow)
+emerges from top of screen. Slow descent. Everything it
+hasn't touched yet is dark. This is the only transition
+mechanism — no cuts, no flashes, ever.
+
+---
+
+### ACT 2 — Title
+
+Line reaches title zone. WATCH-INATOR pixel block letters
+materialise row by row as the line passes. Like being drawn.
+
+Beneath the title, dimly:
+`v0.1.0-alpha`
+
+Same version string as terminal. Consistent.
+
+Particles: some drift around the letters, some rise slowly
+from the bottom of the screen. Canvas-based.
+
+ONE glitch event. Fires randomly 1-5 seconds after title
+fully loads. A random section of the title (different every
+boot) slips out of sync, RGB splits, snaps back. Random
+severity. Happens once only. Never repeats that boot.
+
+---
+
+### ACT 3 — Boot Log
+
+Scanline continues. Each boot log line prints as the line
+passes its position.
+
+[ OK ] — #4caf50 green
+[ WARN ] — #ffeb3b yellow  
+[ INFO ] — #40c4ff blue
+
+~30% of lines briefly scramble into garbled characters
+before self-correcting after 150ms.
+
+---
+
+### ACT 4 — Sidebar (right side, simultaneous)
+
+While main column builds, right sidebar assembles in sync
+with scanline. Line by line, top to bottom.
+
+QR code builds row by row.
+Network text types in beneath it.
+`>> SCAN TO CONFIGURE` in plain text, no emoji.
+Status square blinks on last — glowing square (not circle),
+pulsing. ASCII only throughout.
+
+Width: 170px. Border-left: #162216.
+
+---
+
+### ACT 5 — Loading Bar
+
+Scanline hits bar zone. Spinner appears centred.
+| / - \ cycling at 80ms.
+
+3 phrases drawn randomly from pool of 18 each boot.
+Never sequential.
+
+Phrase 1: smooth fill. Chunky pixel blocks (5px wide,
+1px gap). Irregular chunk sizes 1-3.
+
+Phrase 2: mostly fine. Stutters back 2 blocks mid-way.
+Recovers and finishes.
+
+Phrase 3: fills to ~80%. Completely freezes. Spinner
+keeps going. Holds for ~1800ms. Then lurches to 100%.
+
+`systems go.`
+`>> LAUNCHING KIOSK ENGINE...`
+
+---
+
+### ACT 6 — The Line Delivers
+
+No flash. No cut. No flicker.
+
+Scanline simply continues descending. Boot interface
+dissolves in its wake. Target site already rendering
+underneath in an iframe. Line exits bottom of screen.
+
+Target page fills screen. Silent. Locked. Done.
+Scanline never appears again.
+Boot layer removed from DOM entirely.
+
+---
+
+### ACT 7 — Target Page
+
+Full screen. Hardlocked to target domain.
+Any URL not starting with target domain is silently killed.
+Popups blocked. No address bar. No tabs. No escape.
+Complete silence. No drone. Nothing. Just the site.
+
+---
+
+### Phrase Pool (18 phrases, pick 3 random per boot)
+
+1. Buttering the toast...
+2. Setting the table...
+3. Awesoming everything...
+4. Preheating the oven...
+5. Chopping the onions...
+6. Thinging the thing...
+7. Spinning the spinners...
+8. Untangling the internet...
+9. Feeding the hamsters...
+10. Boiling the kettle...
+11. Finding Waldo...
+12. Asking nicely...
+13. Doing the thing...
+14. Finding the remote...
+15. Remembering that summer...
+16. Holding in farts...
+17. beep boop...
+18. Manifesting...
+
+---
+
+### Audio
+
+Boot bleep: two square wave notes immediately on load.
+D#4 (311hz) then D#5 (622hz). 80ms each. 120ms gap.
+Small gain envelope. Before anything visual.
+
+Terminal phase: silence.
+
+Scanline appears: D# major chord fades in over 3-4s.
+D#, G, A# sawtooth oscillators, slight detune for warmth.
+Slow LFO on gain, gentle undulation between octave registers.
+
+Loading bar: drone at full presence.
+
+Scanline delivers: drone fades out over 4-5 seconds.
+
+Target page: complete silence. Forever.
+
+---
+
+### Visual Style
+
+Font: Share Tech Mono (Google Fonts)
+Background: #070d07
+Primary green: #00e676
+Dim green: #2e7d32
+Text green: #81c784
+OK colour: #4caf50
+WARN colour: #ffeb3b
+INFO colour: #40c4ff
+
+No emoji anywhere. Full ASCII only.
+No circles — squares and rectangles only for UI elements.
+No cuts or flashes for transitions.
+
+Version string: v0.1.0-alpha
+Appears in: terminal UPLOAD line, dimly under boot title.
+
+---
+
+### Technical Stack
+
+Boot screen: single self-contained boot.html file.
+Vanilla JS, CSS, Web Audio API. No frameworks.
+
+Config server: Node.js Express, /server directory.
+Stores settings in config.json.
+Serves config webpage at /.
+boot.html fetches GET /config on load for TARGET_URL.
+
+Pi: Chromium in kiosk mode, opens boot.html on startup.
+Hardlock enforced via Chromium extension (URL whitelist).
+Popup blocker armed.
+
+Hosting: config server on Hetzner.
+Domain via Cloudflare.
+
+Future upgrade: 4G PAYG dongle for portable internet
+(browsing only, not streaming).
+
+---
+
+### Build Order
+
+1. boot.html — terminal intro
+2. boot.html — scanline + title
+3. boot.html — boot log + sidebar
+4. boot.html — loading bar + phrases
+5. boot.html — audio
+6. boot.html — transition to target page
+7. server/ — config system
+8. Pi setup scripts

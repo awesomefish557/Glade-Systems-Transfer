@@ -12,6 +12,7 @@ export type QueueBookie = {
   name: string;
   status: string;
   welcome_claimed: number;
+  joined_at?: string;
   last_activity?: string;
   onboarding_stage?: number;
 };
@@ -64,6 +65,30 @@ function daysSinceLastAction(iso: string | undefined): number | null {
   const now = new Date();
   const diff = now.getTime() - t.getTime();
   return Math.max(0, Math.floor(diff / (24 * 60 * 60 * 1000)));
+}
+
+function parseMaybeDate(iso: string | undefined): Date | null {
+  if (!iso) return null;
+  const t = new Date(iso.includes("T") ? iso : iso.replace(" ", "T"));
+  if (Number.isNaN(t.getTime())) return null;
+  return t;
+}
+
+function startOfWeekMonday(ref = new Date()): Date {
+  const day = ref.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  const mon = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate() + diff);
+  mon.setHours(0, 0, 0, 0);
+  return mon;
+}
+
+function isInCurrentCalendarWeek(iso: string | undefined): boolean {
+  const t = parseMaybeDate(iso);
+  if (!t) return false;
+  const start = startOfWeekMonday(new Date());
+  const end = new Date(start);
+  end.setDate(start.getDate() + 7);
+  return t >= start && t < end;
 }
 
 function stage2ActionLabel(daysInStage: number | null): { label: "Tomorrow" | "Today" | "Overdue"; color: string } {
@@ -170,6 +195,35 @@ export function QueueTab({ bookies, getTierMeta, onPatchBookie, onRefresh }: Que
   );
 
   const focus = useMemo(() => pickFocusBookie(bookies, getTierMeta), [bookies, getTierMeta]);
+  const recommendedNewAccount = useMemo(() => {
+    const activePipeline = bookies.filter((b) => {
+      if (b.status === "closed" || Number(b.welcome_claimed) === 1) return false;
+      const s = normalizeStage(b);
+      return s >= 2 && s <= 4;
+    });
+    const currentlySettingUpCount = activePipeline.length;
+
+    const openedThisWeekCount = activePipeline.filter((b) => isInCurrentCalendarWeek(b.last_activity)).length;
+
+    const mostRecentCreatedMs = activePipeline
+      .map((b) => parseMaybeDate(b.last_activity)?.getTime() ?? NaN)
+      .filter((t) => Number.isFinite(t))
+      .reduce<number | null>((max, t) => (max === null || t > max ? t : max), null);
+    const mostRecentCreatedDaysAgo =
+      mostRecentCreatedMs === null ? null : Math.max(0, Math.floor((Date.now() - mostRecentCreatedMs) / (24 * 60 * 60 * 1000)));
+    const staleEnough = mostRecentCreatedDaysAgo === null || mostRecentCreatedDaysAgo >= 3;
+
+    const tier2Order = ["Sky Bet", "Paddy Power", "Ladbrokes", "William Hill", "Coral", "BetVictor"];
+    const byName = new Map(
+      bookies.map((b) => [b.name.trim().toLowerCase(), b] as const),
+    );
+    const nextUnstarted = tier2Order
+      .map((name) => byName.get(name.toLowerCase()))
+      .find((b) => b && b.status !== "closed" && Number(b.welcome_claimed) !== 1 && normalizeStage(b) === 1);
+
+    const shouldRecommend = currentlySettingUpCount < 2 && staleEnough && openedThisWeekCount < 2 && !!nextUnstarted;
+    return shouldRecommend ? nextUnstarted : null;
+  }, [bookies]);
 
   const handleDropOnColumn = useCallback(
     async (bookieId: number, stage: number) => {
@@ -236,6 +290,37 @@ export function QueueTab({ bookies, getTierMeta, onPatchBookie, onRefresh }: Que
         >
           {patchErr}
         </div>
+      )}
+
+      {recommendedNewAccount && (
+        <section>
+          <div
+            style={{
+              padding: "1rem 1.1rem",
+              background: "#1e2218",
+              border: `1px solid ${GOLD}`,
+              borderRadius: 10,
+              boxShadow: "0 4px 24px rgba(0,0,0,0.28)",
+            }}
+          >
+            <h2
+              className="heading"
+              style={{
+                margin: "0 0 0.5rem",
+                color: GOLD,
+                fontSize: "0.82rem",
+                letterSpacing: "0.14em",
+                textTransform: "uppercase",
+              }}
+            >
+              Ready to open a new account this week?
+            </h2>
+            <p style={{ margin: 0, color: TEXT, fontSize: "0.92rem", lineHeight: 1.55 }}>
+              Recommended next: <strong style={{ color: GOLD }}>{recommendedNewAccount.name}</strong>
+              . Remember: account creation only today - no deposit until tomorrow.
+            </p>
+          </div>
+        </section>
       )}
 
       {/* Section 1 */}

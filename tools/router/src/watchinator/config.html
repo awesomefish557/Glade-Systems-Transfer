@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Watch-inator -- config</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html {
+      -webkit-text-size-adjust: 100%;
+    }
+
+    body {
+      min-height: 100dvh;
+      min-height: 100vh;
+      background: #070d07;
+      color: #00e676;
+      font-family: "Share Tech Mono", ui-monospace, monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+      max-width: 440px;
+      margin: 0 auto;
+    }
+
+    .hdr {
+      font-size: 12px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: rgba(0, 230, 118, 0.55);
+      margin-bottom: 22px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid rgba(0, 230, 118, 0.18);
+    }
+
+    .section {
+      margin-bottom: 28px;
+    }
+
+    .section-title {
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: #81c784;
+      margin-bottom: 14px;
+    }
+
+    label {
+      display: block;
+      font-size: 11px;
+      color: rgba(0, 230, 118, 0.5);
+      margin-top: 12px;
+      margin-bottom: 6px;
+    }
+
+    label:first-of-type {
+      margin-top: 0;
+    }
+
+    input[type="text"],
+    input[type="url"],
+    input[type="password"] {
+      width: 100%;
+      padding: 12px 12px;
+      min-height: 44px;
+      font-size: 16px;
+      font-family: inherit;
+      color: #00e676;
+      background: #030806;
+      border: 1px solid rgba(0, 230, 118, 0.28);
+      border-radius: 2px;
+      -webkit-appearance: none;
+      appearance: none;
+    }
+
+    input:focus {
+      outline: none;
+      border-color: rgba(0, 230, 118, 0.55);
+      box-shadow: 0 0 0 1px rgba(0, 230, 118, 0.15);
+    }
+
+    .pwd-row {
+      display: flex;
+      gap: 8px;
+      align-items: stretch;
+    }
+
+    .pwd-row input {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .toggle-pwd {
+      flex: 0 0 auto;
+      min-width: 72px;
+      min-height: 44px;
+      padding: 0 10px;
+      font-family: inherit;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #00e676;
+      background: rgba(0, 230, 118, 0.08);
+      border: 1px solid rgba(0, 230, 118, 0.35);
+      border-radius: 2px;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .toggle-pwd:active {
+      background: rgba(0, 230, 118, 0.14);
+    }
+
+    .row-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 14px;
+      min-height: 44px;
+    }
+
+    .row-toggle span {
+      font-size: 12px;
+      color: rgba(0, 230, 118, 0.85);
+    }
+
+    input[type="checkbox"] {
+      width: 22px;
+      height: 22px;
+      accent-color: #00e676;
+      flex-shrink: 0;
+    }
+
+    .btn {
+      width: 100%;
+      margin-top: 16px;
+      min-height: 48px;
+      padding: 12px 16px;
+      font-family: inherit;
+      font-size: 12px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #070d07;
+      background: #00e676;
+      border: none;
+      border-radius: 2px;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .btn:active {
+      filter: brightness(0.92);
+    }
+
+    .btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    #status {
+      margin-top: 24px;
+      padding: 14px 12px;
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+      border: 1px solid rgba(0, 230, 118, 0.2);
+      background: #030806;
+      min-height: 1em;
+      display: none;
+    }
+
+    #status.visible {
+      display: block;
+    }
+
+    #status.ok {
+      color: #00e676;
+      border-color: rgba(0, 230, 118, 0.4);
+    }
+
+    #status.err {
+      color: #ff8a80;
+      border-color: rgba(255, 138, 128, 0.35);
+    }
+  </style>
+</head>
+<body>
+  <div class="hdr">watch-inator / setup</div>
+
+  <section class="section" aria-labelledby="wifi-h">
+    <h2 class="section-title" id="wifi-h">1. connect to wifi</h2>
+    <label for="wifi_ssid">network name</label>
+    <input type="text" id="wifi_ssid" name="wifi_ssid" autocomplete="off" autocapitalize="none" spellcheck="false" />
+
+    <label for="wifi_pass">password</label>
+    <div class="pwd-row">
+      <input type="password" id="wifi_pass" name="wifi_pass" autocomplete="off" />
+      <button type="button" class="toggle-pwd" id="togglePwd" aria-label="Show password">show</button>
+    </div>
+
+    <button type="button" class="btn" id="btnConnect">CONNECT</button>
+  </section>
+
+  <section class="section" aria-labelledby="target-h">
+    <h2 class="section-title" id="target-h">2. set target</h2>
+    <label for="target_url">url</label>
+    <input type="url" id="target_url" name="target_url" placeholder="https://youtube.com" autocomplete="off" autocapitalize="none" inputmode="url" />
+
+    <div class="row-toggle">
+      <span>hardlock to this domain</span>
+      <input type="checkbox" id="hardlock" name="hardlock" aria-label="Hardlock to this domain" />
+    </div>
+
+    <button type="button" class="btn" id="btnLock">LOCK IN</button>
+  </section>
+
+  <div id="status" role="status" aria-live="polite"></div>
+
+  <script>
+(function () {
+  function watchinatorBase() {
+    var p = (location.pathname || "/").replace(/\/+$/, "");
+    if (p.endsWith("/config")) return p.slice(0, -7) || "/watchinator";
+    return "/watchinator";
+  }
+
+  var apiUrl = watchinatorBase() + "/api/config";
+  var state = {
+    target_url: "",
+    hardlock: 0,
+    wifi_ssid: "",
+    wifi_pass: "",
+  };
+
+  var el = {
+    wifiSsid: document.getElementById("wifi_ssid"),
+    wifiPass: document.getElementById("wifi_pass"),
+    targetUrl: document.getElementById("target_url"),
+    hardlock: document.getElementById("hardlock"),
+    btnConnect: document.getElementById("btnConnect"),
+    btnLock: document.getElementById("btnLock"),
+    togglePwd: document.getElementById("togglePwd"),
+    status: document.getElementById("status"),
+  };
+
+  function showStatus(ok, text) {
+    el.status.textContent = text;
+    el.status.className = "visible " + (ok ? "ok" : "err");
+  }
+
+  function hideStatus() {
+    el.status.className = "";
+    el.status.textContent = "";
+  }
+
+  function readFormIntoState() {
+    state.wifi_ssid = el.wifiSsid.value.trim();
+    state.wifi_pass = el.wifiPass.value;
+    state.target_url = el.targetUrl.value.trim();
+    state.hardlock = el.hardlock.checked ? 1 : 0;
+  }
+
+  function applyStateToForm() {
+    el.wifiSsid.value = state.wifi_ssid;
+    el.wifiPass.value = state.wifi_pass;
+    el.targetUrl.value = state.target_url;
+    el.hardlock.checked = !!Number(state.hardlock);
+  }
+
+  async function postConfig() {
+    readFormIntoState();
+    var body = {
+      target_url: state.target_url,
+      hardlock: state.hardlock ? 1 : 0,
+      wifi_ssid: state.wifi_ssid,
+      wifi_pass: state.wifi_pass,
+    };
+    var r = await fetch(apiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    var t = await r.text();
+    if (!r.ok) {
+      throw new Error(t || "HTTP " + r.status);
+    }
+    try {
+      var j = JSON.parse(t);
+      if (j && typeof j === "object") {
+        if (j.target_url != null) state.target_url = String(j.target_url);
+        if (j.hardlock != null) state.hardlock = Number(j.hardlock) ? 1 : 0;
+        if (j.wifi_ssid != null) state.wifi_ssid = String(j.wifi_ssid);
+        if (j.wifi_pass != null) state.wifi_pass = String(j.wifi_pass);
+        applyStateToForm();
+      }
+    } catch (e) {}
+  }
+
+  el.togglePwd.addEventListener("click", function () {
+    var i = el.wifiPass;
+    if (i.type === "password") {
+      i.type = "text";
+      el.togglePwd.textContent = "hide";
+    } else {
+      i.type = "password";
+      el.togglePwd.textContent = "show";
+    }
+  });
+
+  el.btnConnect.addEventListener("click", async function () {
+    hideStatus();
+    el.btnConnect.disabled = true;
+    el.btnLock.disabled = true;
+    try {
+      await postConfig();
+      showStatus(true, ">> LOCKED IN. Watch-inator ready.");
+    } catch (e) {
+      showStatus(false, String(e.message || e));
+    }
+    el.btnConnect.disabled = false;
+    el.btnLock.disabled = false;
+  });
+
+  el.btnLock.addEventListener("click", async function () {
+    hideStatus();
+    el.btnConnect.disabled = true;
+    el.btnLock.disabled = true;
+    try {
+      await postConfig();
+      showStatus(true, ">> LOCKED IN. Watch-inator ready.");
+    } catch (e) {
+      showStatus(false, String(e.message || e));
+    }
+    el.btnConnect.disabled = false;
+    el.btnLock.disabled = false;
+  });
+
+  fetch(apiUrl)
+    .then(function (r) {
+      return r.json();
+    })
+    .then(function (j) {
+      if (!j || typeof j !== "object") return;
+      if (j.target_url != null) state.target_url = String(j.target_url);
+      if (j.hardlock != null) state.hardlock = Number(j.hardlock) ? 1 : 0;
+      if (j.wifi_ssid != null) state.wifi_ssid = String(j.wifi_ssid);
+      if (j.wifi_pass != null) state.wifi_pass = String(j.wifi_pass);
+      applyStateToForm();
+    })
+    .catch(function () {});
+})();
+  </script>
+</body>
+</html>

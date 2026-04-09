@@ -1,4 +1,9 @@
-# Cloudflare Pages — build command: npm run build — output: dist
+# Cloudflare Pages — Sonde
+# Dashboard: project name "sonde", root directory tools/sonde, build npm run build, output dist
+# Environment variables (Production + Preview): ANTHROPIC_API_KEY (secret) for /anthropic-api proxy in public/_worker.js
+#
+# Share URL /site?… is rewritten in public/_worker.js (Pages advanced mode). Wrangler does not support [[redirects]] here;
+# public/_redirects is also present for documentation / any static-only mirror of the rule.
 name = "sonde"
 pages_build_output_dir = "dist"
 compatibility_date = "2025-04-01"

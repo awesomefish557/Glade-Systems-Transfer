@@ -1,1 +1,3 @@
-/* /index.html 200
+# Proxy /site share links to SPA root (query string preserved). Status 200 = serve / as if requested.
+# Note: With Pages advanced _worker.js, the worker performs the same rewrite; this file documents the rule for CF Pages.
+/site / 200

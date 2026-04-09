@@ -70,6 +70,23 @@ body {
   max-width: 520px;
 }
 
+.sonde-search-row {
+  display: flex;
+  gap: 0.35rem;
+  align-items: stretch;
+}
+
+.sonde-search-row .sonde-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.sonde-locate-btn {
+  flex-shrink: 0;
+  padding: 0.45rem 0.55rem !important;
+  font-size: 0.72rem !important;
+}
+
 .sonde-search--disabled .sonde-input {
   opacity: 0.55;
 }
@@ -146,9 +163,13 @@ body {
 }
 
 .sonde-topbar-meta {
+  position: relative;
   margin-left: auto;
   min-width: 120px;
   text-align: right;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
 }
 
 .sonde-crumb {
@@ -160,6 +181,71 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
   vertical-align: bottom;
+}
+
+.sonde-save-btn {
+  border-color: var(--sonde-accent-orange);
+  color: #f1d9c9;
+  background: #2b1d14;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+}
+
+.sonde-saved-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: min(520px, 80vw);
+  max-height: 70vh;
+  overflow: auto;
+  padding: 0.75rem;
+  border: 1px solid var(--sonde-edge);
+  background: #171512;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  z-index: 40;
+  text-align: left;
+}
+
+.sonde-saved-item {
+  border: 1px solid #2d2924;
+  background: #1d1a17;
+  padding: 0.55rem;
+  margin-bottom: 0.55rem;
+  font-family: var(--font-mono);
+}
+
+.sonde-saved-name {
+  font-size: 0.8rem;
+  margin-bottom: 0.35rem;
+}
+
+.sonde-saved-address {
+  font-size: 0.72rem;
+  color: var(--sonde-ink-soft);
+}
+
+.sonde-saved-meta {
+  font-size: 0.68rem;
+  color: var(--sonde-ink-muted);
+  margin: 0.18rem 0 0.35rem;
+}
+
+.sonde-saved-notes {
+  margin: 0.32rem 0;
+  min-height: 56px;
+  resize: vertical;
+}
+
+.sonde-saved-files {
+  font-size: 0.68rem;
+  color: var(--sonde-ink-muted);
+}
+
+.sonde-saved-actions {
+  display: flex;
+  gap: 0.45rem;
+  margin-top: 0.42rem;
 }
 
 .sonde-hint-inline {
@@ -231,8 +317,8 @@ body {
 
 .sonde-map-wrap {
   position: relative;
-  height: min(38vh, 320px);
-  min-height: 200px;
+  height: 500px;
+  min-height: 500px;
   border-bottom: 1px solid var(--sonde-edge);
 }
 
@@ -439,6 +525,7 @@ body {
   width: 100%;
   height: auto;
   display: block;
+  touch-action: pan-x pan-y pinch-zoom;
 }
 
 .sonde-svg-text {
@@ -461,10 +548,11 @@ body {
 }
 
 .sonde-legend-item i {
-  width: 14px;
-  height: 3px;
-  border-radius: 1px;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
   display: inline-block;
+  flex-shrink: 0;
 }
 
 .sonde-swatch {
@@ -581,6 +669,41 @@ body {
   font-family: var(--font-mono);
 }
 
+.sonde-subhead {
+  margin: 1rem 0 0.45rem;
+  font-size: 0.92rem;
+  color: var(--sonde-ink-soft);
+}
+
+.sonde-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.8rem;
+}
+
+.sonde-card-grid {
+  margin-top: 0.8rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
+.sonde-card {
+  border: 1px solid var(--sonde-edge);
+  background: #191714;
+  padding: 0.7rem;
+}
+
+.sonde-card h3 {
+  margin: 0 0 0.25rem;
+}
+
+.sonde-form-grid {
+  display: grid;
+  gap: 0.6rem;
+}
+
 .sonde-export-actions {
   display: flex;
   flex-wrap: wrap;
@@ -593,6 +716,10 @@ body {
   grid-template-columns: 1fr 1fr;
   gap: 1rem;
   align-items: start;
+}
+
+.sonde-export-col--full {
+  grid-column: 1 / -1;
 }
 
 .sonde-export-col {
@@ -659,4 +786,66 @@ body {
 
 .mapboxgl-ctrl-logo {
   opacity: 0.55 !important;
+}
+
+@media (max-width: 768px) {
+  .sonde-body {
+    flex-direction: column;
+  }
+
+  .sonde-main {
+    order: 1;
+    min-height: 0;
+    flex: 1;
+  }
+
+  .sonde-sidebar {
+    order: 2;
+    width: 100%;
+    max-height: 44vh;
+    border-right: none;
+    border-top: 1px solid var(--sonde-edge);
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .sonde-nav {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    gap: 4px;
+    padding-bottom: 4px;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .sonde-tab {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  .sonde-sidebar-foot {
+    display: none;
+  }
+
+  .sonde-map-wrap {
+    height: min(42vh, 380px);
+    min-height: 260px;
+  }
+
+  .sonde-topbar {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .sonde-topbar-meta {
+    margin-left: 0;
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .sonde-export-grid {
+    grid-template-columns: 1fr;
+  }
 }

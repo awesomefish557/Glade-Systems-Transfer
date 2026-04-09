@@ -1,0 +1,11 @@
+# D1 migrations: repo root ../../migrations/ (watchinator_init.sql).
+# Apply remote: npx wrangler d1 migrations apply watchinator-db --remote
+name = "watchinator-worker"
+main = "src/index.js"
+compatibility_date = "2026-04-08"
+
+[[d1_databases]]
+binding = "WATCHINATOR_DB"
+database_name = "watchinator-db"
+database_id = "eabf92d7-4b0e-4fcb-9712-032e9bf6527e"
+migrations_dir = "../../migrations"

@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Watch-inator -- dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      min-height: 100dvh;
+      min-height: 100vh;
+      background: #070d07;
+      color: #00e676;
+      font-family: "Share Tech Mono", ui-monospace, monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+      max-width: 440px;
+      margin: 0 auto;
+    }
+    .hdr {
+      font-size: 12px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: rgba(0, 230, 118, 0.55);
+      margin-bottom: 22px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid rgba(0, 230, 118, 0.18);
+    }
+    .hidden { display: none !important; }
+    label {
+      display: block;
+      font-size: 11px;
+      color: rgba(0, 230, 118, 0.5);
+      margin-bottom: 8px;
+    }
+    input[type="password"],
+    input[type="url"],
+    input[type="text"] {
+      width: 100%;
+      padding: 12px;
+      min-height: 44px;
+      font-size: 16px;
+      font-family: inherit;
+      color: #00e676;
+      background: #030806;
+      border: 1px solid rgba(0, 230, 118, 0.28);
+      border-radius: 2px;
+      -webkit-appearance: none;
+      appearance: none;
+    }
+    input:focus {
+      outline: none;
+      border-color: rgba(0, 230, 118, 0.55);
+    }
+    .btn {
+      margin-top: 14px;
+      min-height: 48px;
+      padding: 12px 14px;
+      font-family: inherit;
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #070d07;
+      background: #00e676;
+      border: none;
+      border-radius: 2px;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .btn:active { filter: brightness(0.92); }
+    .btn.secondary {
+      margin-top: 0;
+      margin-left: 8px;
+      min-height: 40px;
+      padding: 8px 12px;
+      color: #00e676;
+      background: rgba(0, 230, 118, 0.1);
+      border: 1px solid rgba(0, 230, 118, 0.35);
+    }
+    .btn-row { display: flex; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+    .row {
+      margin-bottom: 18px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid rgba(0, 230, 118, 0.1);
+    }
+    .row:last-of-type { border-bottom: none; }
+    .k {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #81c784;
+      margin-bottom: 6px;
+    }
+    .v {
+      font-size: 13px;
+      color: #00e676;
+      word-break: break-all;
+    }
+    .err {
+      margin-top: 12px;
+      font-size: 12px;
+      color: #ff8a80;
+    }
+    #urlEdit { margin-top: 10px; }
+    #urlEdit.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div id="pinGate">
+    <div class="hdr">watch-inator / dashboard</div>
+    <label for="pinInput">enter pin</label>
+    <input type="password" id="pinInput" autocomplete="off" autocapitalize="none" spellcheck="false" />
+    <button type="button" class="btn" id="pinSubmit">UNLOCK</button>
+    <p class="err hidden" id="pinErr"></p>
+  </div>
+
+  <div id="dash" class="hidden">
+    <div class="hdr">watch-inator / dashboard</div>
+
+    <div class="row">
+      <div class="k">current url</div>
+      <div class="v" id="dispUrl">--</div>
+      <div class="btn-row">
+        <button type="button" class="btn secondary" id="btnChange">CHANGE</button>
+      </div>
+      <div id="urlEdit" class="hidden">
+        <label for="newUrl">new url</label>
+        <input type="url" id="newUrl" placeholder="https://" inputmode="url" autocomplete="off" />
+        <button type="button" class="btn" id="btnSaveUrl">SAVE</button>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="k">hardlock</div>
+      <div class="v" id="dispLock">--</div>
+      <div class="btn-row">
+        <button type="button" class="btn secondary" id="btnToggle">TOGGLE</button>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="k">version</div>
+      <div class="v" id="dispVer">v0.1.0-alpha</div>
+    </div>
+
+    <div class="row">
+      <div class="k">last updated</div>
+      <div class="v" id="dispUpd">--</div>
+    </div>
+
+    <p class="err hidden" id="dashErr"></p>
+  </div>
+
+  <script>
+(function () {
+  var PIN_KEY = "watchinatorDashboardPin";
+
+  function watchinatorBase() {
+    var p = (location.pathname || "/").replace(/\/+$/, "");
+    if (p.endsWith("/dashboard")) return p.slice(0, -10) || "/watchinator";
+    return "/watchinator";
+  }
+
+  var apiUrl = watchinatorBase() + "/api/config";
+
+  var pinGate = document.getElementById("pinGate");
+  var dash = document.getElementById("dash");
+  var pinInput = document.getElementById("pinInput");
+  var pinSubmit = document.getElementById("pinSubmit");
+  var pinErr = document.getElementById("pinErr");
+  var dashErr = document.getElementById("dashErr");
+
+  var state = {
+    target_url: "",
+    hardlock: 0,
+    wifi_ssid: "",
+    wifi_pass: "",
+    version: "v0.1.0-alpha",
+    updated_at: "",
+  };
+
+  function getPin() {
+    return sessionStorage.getItem(PIN_KEY) || "";
+  }
+
+  function setPin(p) {
+    sessionStorage.setItem(PIN_KEY, p);
+  }
+
+  function clearPin() {
+    sessionStorage.removeItem(PIN_KEY);
+  }
+
+  function authHeaders() {
+    var p = getPin();
+    var h = { "Content-Type": "application/json" };
+    if (p) h["X-Dashboard-Pin"] = p;
+    return h;
+  }
+
+  function showPinErr(t) {
+    pinErr.textContent = t || "";
+    pinErr.classList.toggle("hidden", !t);
+  }
+
+  function showDashErr(t) {
+    dashErr.textContent = t || "";
+    dashErr.classList.toggle("hidden", !t);
+  }
+
+  function showPinScreen() {
+    pinGate.classList.remove("hidden");
+    dash.classList.add("hidden");
+    pinInput.value = "";
+    showPinErr("");
+    pinInput.focus();
+  }
+
+  function showDash() {
+    pinGate.classList.add("hidden");
+    dash.classList.remove("hidden");
+  }
+
+  function fmtTime(iso) {
+    if (!iso) return "--";
+    try {
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      return d.toLocaleString();
+    } catch (e) {
+      return iso;
+    }
+  }
+
+  function applyStateToDom() {
+    document.getElementById("dispUrl").textContent = state.target_url || "(empty)";
+    document.getElementById("dispLock").textContent = Number(state.hardlock) ? "ON" : "OFF";
+    document.getElementById("dispVer").textContent = state.version || "v0.1.0-alpha";
+    document.getElementById("dispUpd").textContent = fmtTime(state.updated_at);
+  }
+
+  async function apiFetch(method, bodyObj) {
+    var init = {
+      method: method,
+      headers: authHeaders(),
+    };
+    if (bodyObj != null) init.body = JSON.stringify(bodyObj);
+    var r = await fetch(apiUrl, init);
+    if (r.status === 401) {
+      var wasAuthed = !dash.classList.contains("hidden");
+      clearPin();
+      showPinScreen();
+      showPinErr(wasAuthed ? "session expired. enter pin again." : "pin rejected");
+      throw new Error("401");
+    }
+    var t = await r.text();
+    if (!r.ok) throw new Error(t || "HTTP " + r.status);
+    if (method === "GET" || (method === "POST" && t)) {
+      try {
+        return JSON.parse(t);
+      } catch (e) {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  async function loadConfig() {
+    showDashErr("");
+    var j = await apiFetch("GET", null);
+    if (!j) return;
+    if (j.target_url != null) state.target_url = String(j.target_url);
+    if (j.hardlock != null) state.hardlock = Number(j.hardlock) ? 1 : 0;
+    if (j.wifi_ssid != null) state.wifi_ssid = String(j.wifi_ssid);
+    if (j.wifi_pass != null) state.wifi_pass = String(j.wifi_pass);
+    if (j.version != null) state.version = String(j.version);
+    if (j.updated_at != null) state.updated_at = String(j.updated_at);
+    applyStateToDom();
+  }
+
+  pinInput.addEventListener("keydown", function (ev) {
+    if (ev.key === "Enter") pinSubmit.click();
+  });
+
+  pinSubmit.addEventListener("click", async function () {
+    showPinErr("");
+    var p = pinInput.value;
+    if (!p) {
+      showPinErr("pin required");
+      return;
+    }
+    setPin(p);
+    try {
+      await apiFetch("GET", null);
+      showDash();
+      document.getElementById("urlEdit").classList.add("hidden");
+      await loadConfig();
+    } catch (e) {
+      if (String(e.message) !== "401") {
+        showPinErr(String(e.message || e));
+      }
+    }
+  });
+
+  document.getElementById("btnChange").addEventListener("click", function () {
+    var ed = document.getElementById("urlEdit");
+    var on = !ed.classList.contains("hidden");
+    if (on) {
+      ed.classList.add("hidden");
+    } else {
+      document.getElementById("newUrl").value = state.target_url;
+      ed.classList.remove("hidden");
+      document.getElementById("newUrl").focus();
+    }
+  });
+
+  document.getElementById("btnSaveUrl").addEventListener("click", async function () {
+    showDashErr("");
+    var u = document.getElementById("newUrl").value.trim();
+    try {
+      await apiFetch("POST", {
+        target_url: u,
+        hardlock: state.hardlock ? 1 : 0,
+        wifi_ssid: state.wifi_ssid,
+        wifi_pass: state.wifi_pass,
+      });
+      document.getElementById("urlEdit").classList.add("hidden");
+      await loadConfig();
+    } catch (e) {
+      showDashErr(String(e.message || e));
+    }
+  });
+
+  document.getElementById("btnToggle").addEventListener("click", async function () {
+    showDashErr("");
+    var next = state.hardlock ? 0 : 1;
+    try {
+      await apiFetch("POST", {
+        target_url: state.target_url,
+        hardlock: next,
+        wifi_ssid: state.wifi_ssid,
+        wifi_pass: state.wifi_pass,
+      });
+      await loadConfig();
+    } catch (e) {
+      showDashErr(String(e.message || e));
+    }
+  });
+
+  if (getPin()) {
+    showDash();
+    loadConfig().catch(function (e) {
+      showDashErr(String(e.message || e));
+    });
+  } else {
+    showPinScreen();
+  }
+})();
+  </script>
+</body>
+</html>

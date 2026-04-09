@@ -238,12 +238,12 @@ export function SolarModule({ data }: { data: SolarSummary | null }) {
           <figure className="sonde-figure">
             <svg
               id="sonde-svg-solar-availability"
-              viewBox="0 0 520 520"
+              viewBox="0 0 600 650"
               className="sonde-svg"
               role="img"
               aria-label="Solar availability ring by compass bearing"
             >
-              <rect width="520" height="520" fill="none" />
+              <rect width="600" height="650" fill="none" />
               {seasonOrder.map((curve, idx) => {
                 const rOuter = ringOuter - idx * (ringBand + ringGap)
                 const rInner = rOuter - ringBand
@@ -260,7 +260,8 @@ export function SolarModule({ data }: { data: SolarSummary | null }) {
                         <path
                           key={`${curve.seasonKey}-${start}`}
                           d={sectorPath(ringCenter, ringCenter, rInner, rOuter, segStart, segEnd)}
-                          fill={isLit ? '#F0C63C' : '#4D514B'}
+                          fill={isLit ? '#d4a853' : '#555555'}
+                          fillOpacity={1}
                           stroke="none"
                         />
                       )
@@ -300,37 +301,6 @@ export function SolarModule({ data }: { data: SolarSummary | null }) {
                 )
               })}
 
-              {seasonOrder.map((curve, idx) => {
-                const rOuter = ringOuter - idx * (ringBand + ringGap)
-                const rMid = rOuter - ringBand / 2
-                const labelAngle = 126 - idx * 12
-                const anchor = azimuthToXY(rMid, labelAngle)
-                const label = azimuthToXY(ringOuter + 70 + idx * 14, labelAngle)
-                return (
-                  <g key={`label-${curve.seasonKey}`}>
-                    <line
-                      x1={ringCenter + anchor.x}
-                      y1={ringCenter + anchor.y}
-                      x2={ringCenter + label.x}
-                      y2={ringCenter + label.y}
-                      stroke="var(--sonde-ink-muted)"
-                      strokeWidth={0.9}
-                    />
-                    <text
-                      x={ringCenter + label.x + 6}
-                      y={ringCenter + label.y}
-                      fill="var(--sonde-ink-soft)"
-                      fontSize={10}
-                      textAnchor="start"
-                      dominantBaseline="middle"
-                      className="sonde-svg-text"
-                    >
-                      {curve.label}
-                    </text>
-                  </g>
-                )
-              })}
-
               <text
                 x={ringCenter}
                 y={36}
@@ -341,16 +311,26 @@ export function SolarModule({ data }: { data: SolarSummary | null }) {
               >
                 Solar availability ring (yellow = sun present at bearing)
               </text>
+
             </svg>
             <figcaption className="sonde-figcaption">
               <span className="sonde-legend-item">
-                <i style={{ background: '#F0C63C' }} /> Bearing reached by sun
+                <i style={{ background: '#d4a853' }} /> Bearing reached by sun
               </span>
               <span className="sonde-legend-item">
-                <i style={{ background: '#4D514B' }} /> No direct solar bearing
+                <i style={{ background: '#555555' }} /> No direct solar bearing
               </span>
               <span className="sonde-legend-item">
-                Outermost ring: summer solstice · innermost: winter solstice
+                Outermost ring: Summer solstice
+              </span>
+              <span className="sonde-legend-item">
+                Second ring: Vernal equinox
+              </span>
+              <span className="sonde-legend-item">
+                Third ring: Autumnal equinox
+              </span>
+              <span className="sonde-legend-item">
+                Innermost ring: Winter solstice
               </span>
             </figcaption>
           </figure>

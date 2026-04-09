@@ -3,11 +3,18 @@ main = "src/index.ts"
 compatibility_date = "2024-01-01"
 workers_dev = true
 
+rules = [{ type = "Text", globs = ["**/*.html"], fallthrough = true }]
+
+[[d1_databases]]
+binding = "WATCHINATOR_DB"
+database_name = "watchinator-db"
+database_id = "eabf92d7-4b0e-4fcb-9712-032e9bf6527e"
+
 # Public base URL for the Node convertor (no trailing slash). Must be reachable from Cloudflare’s edge
 # (not 127.0.0.1). Mirrors cosmo.gladesystems.uk — change if you host elsewhere or use HTTPS on 443.
 [vars]
 CONVERTOR_ORIGIN = "http://convertor.gladesystems.uk:3847"
-# Site-wide password gate for gladesystems.uk (and workers.dev). Remove or empty to disable. For production, prefer Workers → Secrets → GLADE_GATE_PASSWORD instead of committing.
+# Site-wide password gate (HTML /gate + cookie); /watchinator/* stays public. Remove or empty to disable. Prefer Workers → Secrets → GLADE_GATE_PASSWORD instead of committing.
 GLADE_GATE_PASSWORD = "mU5/6yU"
 # Delphi: Scenario Explorer static build on Pages (Delphi/scenario-explorer → delphi-ui project). Default upstream production.delphi-ui.pages.dev. Override for custom domain:
 # DELPHI_ORIGIN = "https://delphi.gladesystems.uk"

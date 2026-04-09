@@ -1,0 +1,2400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Watch-inator — boot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #030806;
+      color: #00e676;
+      font-family: "Share Tech Mono", ui-monospace, monospace;
+      font-size: 11px;
+      line-height: 1.75;
+    }
+
+    #stage {
+      position: relative;
+      z-index: 10;
+      width: 100%;
+      height: 100%;
+      min-height: 100vh;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      background: #030806;
+    }
+
+    #stage.blackout {
+      background: #000;
+    }
+
+    #stage.blackout #scroll {
+      opacity: 0;
+      visibility: hidden;
+    }
+
+    #stage.scanline-boot #scroll {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+
+    #scroll {
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding: 12px 14px 20px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      scrollbar-width: thin;
+      scrollbar-color: #1a2e1a #070d07;
+    }
+
+    #scroll::-webkit-scrollbar { width: 6px; }
+    #scroll::-webkit-scrollbar-track { background: #070d07; }
+    #scroll::-webkit-scrollbar-thumb { background: #1a2e1a; border-radius: 2px; }
+
+    .line { display: block; }
+
+    .cursor {
+      display: inline-block;
+      width: 0.55em;
+      margin-left: 1px;
+      background: #00e676;
+      animation: blink 0.85s step-end infinite;
+      vertical-align: text-bottom;
+      min-height: 1em;
+    }
+
+    .cursor.off { animation: none; opacity: 0; }
+
+    @keyframes blink {
+      50% { opacity: 0; }
+    }
+
+    #fx {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: none;
+      pointer-events: none;
+      z-index: 50;
+      background: transparent;
+    }
+
+    #fx.active {
+      display: block;
+    }
+
+    #heroClip {
+      position: fixed;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 0;
+      overflow: hidden;
+      z-index: 49;
+      pointer-events: none;
+      background: #020403;
+    }
+
+    #heroClip::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0, 0, 0, 0.14) 2px,
+        rgba(0, 0, 0, 0.14) 3px
+      );
+      opacity: 0.4;
+    }
+
+    #heroStack {
+      position: absolute;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      left: 0;
+      top: 0;
+    }
+
+    .hero-title {
+      display: flex;
+      flex-direction: row;
+      align-items: flex-start;
+      gap: var(--gap, 8px);
+    }
+
+    .hero-title-glow {
+      display: flex;
+      flex-direction: row;
+      align-items: flex-start;
+      gap: var(--gap, 8px);
+      isolation: isolate;
+      will-change: filter;
+      animation-name: heroCandle;
+      animation-timing-function: ease-in-out;
+      animation-iteration-count: infinite;
+      animation-duration: var(--glow-dur, 10.4s);
+      animation-delay: var(--glow-delay, 0s);
+    }
+
+    @keyframes heroCandle {
+      0%, 100% {
+        filter:
+          drop-shadow(0 0 4px rgba(0, 140, 80, 0.2))
+          drop-shadow(0 0 12px rgba(0, 90, 50, 0.08))
+          brightness(1);
+      }
+      22% {
+        filter:
+          drop-shadow(0 0 8px rgba(0, 180, 100, 0.28))
+          drop-shadow(0 0 18px rgba(0, 100, 60, 0.1))
+          brightness(1.015);
+      }
+      48% {
+        filter:
+          drop-shadow(0 0 3px rgba(0, 120, 70, 0.16))
+          drop-shadow(0 0 8px rgba(0, 60, 35, 0.06))
+          brightness(0.97);
+      }
+      71% {
+        filter:
+          drop-shadow(0 0 6px rgba(0, 160, 95, 0.24))
+          drop-shadow(0 0 14px rgba(0, 85, 50, 0.09))
+          brightness(1.01);
+      }
+    }
+
+    .hero-title.hero-title--matrix {
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .hero-letter {
+      display: grid;
+      grid-template-columns: repeat(5, var(--pixel, 14px));
+      grid-template-rows: repeat(7, var(--pixel, 14px));
+      gap: 0;
+      position: relative;
+      min-width: calc(5 * var(--pixel, 14px));
+      filter: drop-shadow(0 0 5px rgba(0, 255, 150, 0.5))
+        drop-shadow(0 0 14px rgba(0, 230, 118, 0.28));
+    }
+
+    .hero-letter::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+      opacity: 0.4;
+      background-image:
+        repeating-linear-gradient(
+          90deg,
+          transparent 0,
+          transparent calc(var(--pixel) - 1px),
+          rgba(0, 255, 180, 0.22) calc(var(--pixel) - 1px),
+          rgba(0, 255, 180, 0.22) var(--pixel)
+        ),
+        repeating-linear-gradient(
+          0deg,
+          transparent 0,
+          transparent calc(var(--pixel) - 1px),
+          rgba(0, 255, 180, 0.16) calc(var(--pixel) - 1px),
+          rgba(0, 255, 180, 0.16) var(--pixel)
+        );
+      mix-blend-mode: screen;
+    }
+
+    .hero-pixel {
+      position: relative;
+      z-index: 1;
+      display: block;
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      --mx: 0px;
+      --my: 0px;
+      transform: translate3d(var(--mx), var(--my), 0);
+      background: linear-gradient(
+        155deg,
+        #1a5c38 0%,
+        #00ff88 38%,
+        #00e676 52%,
+        #008c4a 100%
+      );
+      box-shadow:
+        inset 0 0 0 1px rgba(180, 255, 210, 0.45),
+        inset 0 1px 0 rgba(255, 255, 255, 0.18),
+        inset 0 -1px 0 rgba(0, 0, 0, 0.35),
+        0 0 10px rgba(0, 255, 140, 0.55),
+        0 0 20px rgba(0, 230, 118, 0.2);
+    }
+
+    .hero-pixel.mis {
+      filter: brightness(1.15) saturate(1.08);
+    }
+
+    .hero-tagline {
+      font-size: 11px;
+      line-height: 1.5;
+      color: rgba(0, 230, 118, 0.58);
+      text-align: center;
+      letter-spacing: 0.03em;
+      text-transform: lowercase;
+      width: 100%;
+      max-width: min(92vw, 520px);
+      margin: 0 auto;
+      text-shadow: none;
+      filter: none;
+    }
+
+    .hero-version {
+      font-size: 10px;
+      line-height: 1.35;
+      color: rgba(0, 230, 118, 0.4);
+      text-align: center;
+      letter-spacing: 0.04em;
+      width: 100%;
+      max-width: min(92vw, 520px);
+      margin: 6px auto 0;
+      text-shadow: none;
+      filter: none;
+    }
+
+    #targetFrame {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: 0;
+      z-index: 1;
+      opacity: 1;
+      visibility: visible;
+      pointer-events: none;
+      background: #000;
+    }
+
+    #targetFrame.target-front {
+      z-index: 200;
+      pointer-events: auto;
+    }
+
+    #configWaitOverlay {
+      position: fixed;
+      inset: 0;
+      z-index: 250;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #070d07;
+      font-family: "Share Tech Mono", ui-monospace, monospace;
+      padding: 24px;
+      text-align: center;
+    }
+
+    #configWaitOverlay.visible {
+      display: flex;
+    }
+
+    .config-wait-title {
+      font-size: 13px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #00e676;
+      margin-bottom: 20px;
+    }
+
+    #configWaitQr {
+      display: block;
+      width: 240px;
+      height: 240px;
+      image-rendering: pixelated;
+      border: 1px solid rgba(0, 230, 118, 0.25);
+      background: #fff;
+    }
+
+    .config-wait-hint {
+      margin-top: 18px;
+      font-size: 11px;
+      line-height: 1.5;
+      color: rgba(0, 230, 118, 0.55);
+      max-width: 280px;
+    }
+
+    .config-wait-url {
+      margin-top: 10px;
+      font-size: 10px;
+      word-break: break-all;
+      color: #81c784;
+      max-width: min(92vw, 360px);
+    }
+  </style>
+</head>
+<body>
+  <iframe id="targetFrame" title="Kiosk" src="about:blank"></iframe>
+  <div id="configWaitOverlay" aria-hidden="true">
+    <p class="config-wait-title">&gt;&gt; waiting for config</p>
+    <img id="configWaitQr" alt="" width="240" height="240" decoding="async" />
+    <p class="config-wait-hint">Scan QR with your phone to open the setup page.</p>
+    <p class="config-wait-url" id="configWaitUrlText"></p>
+  </div>
+  <div id="stage">
+    <div id="scroll" aria-live="polite"></div>
+    <div id="heroClip" aria-hidden="true">
+      <div id="heroStack">
+        <div id="heroTitle" class="hero-title"></div>
+        <p id="heroTagline" class="hero-tagline">-- one screen . one site . no nonsense --</p>
+        <p id="heroVersion" class="hero-version" aria-hidden="true"></p>
+      </div>
+    </div>
+    <canvas id="fx" aria-hidden="true"></canvas>
+  </div>
+  <script>
+(function () {
+  const PROMPT_ROOT = "root@";
+  const PROMPT_PASTE = PROMPT_ROOT + "watchinator:~$ ";
+  const SUDO_CMD = "sudo ./launch_kiosk.sh";
+  const FULL_CMD = PROMPT_PASTE + SUDO_CMD;
+  const PASS_LABEL = "[sudo] password for pi: ";
+  const SUCCESS = "UPLOAD SUCCESSFUL. Watch-inator v0.1.0-alpha ready.";
+
+  const scroll = document.getElementById("scroll");
+  const stage = document.getElementById("stage");
+  const canvas = document.getElementById("fx");
+  const heroClip = document.getElementById("heroClip");
+  const heroStack = document.getElementById("heroStack");
+  const heroTitleEl = document.getElementById("heroTitle");
+  const heroTaglineEl = document.getElementById("heroTagline");
+  const heroVersionEl = document.getElementById("heroVersion");
+  const targetFrame = document.getElementById("targetFrame");
+  const configWaitOverlay = document.getElementById("configWaitOverlay");
+  const configWaitQr = document.getElementById("configWaitQr");
+  const configWaitUrlText = document.getElementById("configWaitUrlText");
+
+  const WATCHINATOR_CONFIG_API =
+    "https://gladesystems.uk/watchinator/api/config";
+  const WATCHINATOR_CONFIG_PAGE =
+    "https://gladesystems.uk/watchinator/config";
+
+  const CONFIG = {
+    TARGET_URL: "",
+    VERSION: "v0.1.0-alpha",
+  };
+
+  var configPollTimer = null;
+
+  async function fetchWatchinatorConfig() {
+    try {
+      var r = await fetch(WATCHINATOR_CONFIG_API, { cache: "no-store" });
+      if (!r.ok) return;
+      var j = await r.json();
+      if (!j || typeof j !== "object") return;
+      if (typeof j.version === "string" && j.version.trim()) {
+        CONFIG.VERSION = j.version.trim();
+      }
+      if (typeof j.target_url === "string" && j.target_url.trim()) {
+        CONFIG.TARGET_URL = j.target_url.trim();
+      }
+    } catch (e) {}
+  }
+
+  function showConfigWaitOverlay() {
+    if (!configWaitOverlay) return;
+    if (configWaitUrlText) {
+      configWaitUrlText.textContent = WATCHINATOR_CONFIG_PAGE;
+    }
+    if (configWaitQr) {
+      configWaitQr.src =
+        "https://api.qrserver.com/v1/create-qr-code/?size=240x240&margin=8&data=" +
+        encodeURIComponent(WATCHINATOR_CONFIG_PAGE);
+      configWaitQr.alt = "QR code: open config page";
+    }
+    configWaitOverlay.classList.add("visible");
+    configWaitOverlay.setAttribute("aria-hidden", "false");
+  }
+
+  function hideConfigWaitOverlay() {
+    if (!configWaitOverlay) return;
+    configWaitOverlay.classList.remove("visible");
+    configWaitOverlay.setAttribute("aria-hidden", "true");
+    if (configPollTimer !== null) {
+      clearInterval(configPollTimer);
+      configPollTimer = null;
+    }
+  }
+
+  function revealTargetFrame(url) {
+    if (!targetFrame || !url) return;
+    targetFrame.src = url;
+    targetFrame.classList.add("target-front");
+  }
+
+  function startConfigPoll() {
+    if (configPollTimer !== null) return;
+    function pollOnce() {
+      fetch(WATCHINATOR_CONFIG_API, { cache: "no-store" })
+        .then(function (r) {
+          if (!r.ok) return null;
+          return r.json();
+        })
+        .then(function (j) {
+          if (!j || typeof j !== "object") return;
+          var u =
+            typeof j.target_url === "string" ? j.target_url.trim() : "";
+          if (!u) return;
+          CONFIG.TARGET_URL = u;
+          if (typeof j.version === "string" && j.version.trim()) {
+            CONFIG.VERSION = j.version.trim();
+          }
+          hideConfigWaitOverlay();
+          revealTargetFrame(u);
+        })
+        .catch(function () {});
+    }
+    pollOnce();
+    configPollTimer = setInterval(pollOnce, 5000);
+  }
+
+  var BootAudio = (function () {
+    var ac = null;
+    var droneOscs = [];
+    var droneLfo = null;
+    var droneTrem = null;
+    var droneEnv = null;
+    var droneLP = null;
+    var dronePostGain = null;
+    var noiseSrc = null;
+    var atmosLfo = null;
+    var atmosLfo2 = null;
+    var subLfo1 = null;
+    var subLfo2 = null;
+    var subLfo3 = null;
+    var subLfo4 = null;
+    var whaleLfo1 = null;
+    var whaleLfo2 = null;
+    var whaleLfo3 = null;
+    var whaleLfo4 = null;
+    var bassSwellLfo1 = null;
+    var bassSwellLfo2 = null;
+    var bassSwellLfo3 = null;
+    var phraseBus = null;
+    var phraseTimer = null;
+    var phraseNextPattern1 = true;
+    var masterComp = null;
+    var masterGain = null;
+    var droneStarted = false;
+    var fadeOutScheduled = false;
+
+    function et12Hz(midi) {
+      return 440 * Math.pow(2, (midi - 69) / 12);
+    }
+
+    function ensureMaster(c) {
+      if (!masterComp) {
+        masterComp = c.createDynamicsCompressor();
+        masterComp.threshold.value = -18;
+        masterComp.knee.value = 14;
+        masterComp.ratio.value = 3;
+        masterComp.attack.value = 0.004;
+        masterComp.release.value = 0.28;
+        masterGain = c.createGain();
+        masterGain.gain.value = 0.975;
+        masterComp.connect(masterGain);
+        masterGain.connect(c.destination);
+      }
+    }
+
+    function phraseVoiceOscs(c, envGain, freq, t0, dur, stopPad) {
+      var det = -14 + Math.random() * 28;
+      var ratio = Math.random() < 0.4 ? 3 : 2;
+      var carrier = c.createOscillator();
+      carrier.type = "sine";
+      carrier.frequency.setValueAtTime(freq, t0);
+      carrier.detune.setValueAtTime(det, t0);
+      var mod = c.createOscillator();
+      mod.type = "sine";
+      mod.frequency.setValueAtTime(freq * ratio, t0);
+      var modDepth = c.createGain();
+      var atk = Math.min(0.016, Math.max(0.004, dur * 0.055));
+      var peakBeta = Math.min(0.42, 0.09 + 300 / freq);
+      modDepth.gain.setValueAtTime(0, t0);
+      modDepth.gain.linearRampToValueAtTime(peakBeta, t0 + atk);
+      modDepth.gain.linearRampToValueAtTime(peakBeta * 0.14, t0 + dur * 0.72);
+      modDepth.gain.linearRampToValueAtTime(0, t0 + dur);
+      mod.connect(modDepth);
+      modDepth.connect(carrier.frequency);
+      carrier.connect(envGain);
+      mod.start(t0);
+      carrier.start(t0);
+      mod.stop(t0 + dur + stopPad);
+      carrier.stop(t0 + dur + stopPad);
+    }
+
+    function phraseSynthNote(c, bus, freq, t0, dur, peak) {
+      var g = c.createGain();
+      var atk = Math.min(0.018, dur * 0.12);
+      var rel = Math.min(0.03, dur * 0.08);
+      g.gain.setValueAtTime(0, t0);
+      g.gain.linearRampToValueAtTime(peak, t0 + atk);
+      if (dur > atk + rel) {
+        g.gain.setValueAtTime(peak, t0 + dur - rel);
+      }
+      g.gain.linearRampToValueAtTime(0, t0 + dur);
+      phraseVoiceOscs(c, g, freq, t0, dur, 0.04);
+      g.connect(bus);
+    }
+
+    function phraseSynthFade(c, bus, freq, t0, dur, peak) {
+      var g = c.createGain();
+      g.gain.setValueAtTime(0, t0);
+      g.gain.linearRampToValueAtTime(peak, t0 + 0.022);
+      g.gain.linearRampToValueAtTime(0, t0 + dur);
+      phraseVoiceOscs(c, g, freq, t0, dur, 0.05);
+      g.connect(bus);
+    }
+
+    function phrasePattern1(c, bus, t0) {
+      var As5 = et12Hz(82);
+      var Gs5 = et12Hz(80);
+      var Ds5 = et12Hz(75);
+      var third = (1 / 3) * 1.25;
+      var fourThirds = (4 / 3) * 1.25;
+      phraseSynthNote(c, bus, As5, t0, third, 0.286);
+      phraseSynthNote(c, bus, Gs5, t0 + third, third, 0.264);
+      phraseSynthFade(c, bus, Ds5, t0 + 2 * third, fourThirds, 0.242);
+    }
+
+    function phrasePattern2(c, bus, t0) {
+      var C5 = et12Hz(72);
+      var Bb4 = et12Hz(70);
+      var Ds5 = et12Hz(75);
+      var twoThirds = (2 / 3) * 1.25;
+      var third = (1 / 3) * 1.25;
+      var lastDur = (2 / 3) * 1.25;
+      phraseSynthNote(c, bus, C5, t0, twoThirds, 0.264);
+      phraseSynthNote(c, bus, Bb4, t0 + twoThirds, third, 0.242);
+      phraseSynthNote(c, bus, C5, t0 + twoThirds + third, third, 0.253);
+      phraseSynthFade(c, bus, Ds5, t0 + (4 / 3) * 1.25, lastDur, 0.231);
+    }
+
+    function clearPhraseTimer() {
+      if (phraseTimer !== null) {
+        clearTimeout(phraseTimer);
+        phraseTimer = null;
+      }
+    }
+
+    function schedulePhraseLoop() {
+      clearPhraseTimer();
+      if (fadeOutScheduled || !droneStarted) return;
+      var firstDelayMs = (19.5 + Math.random() * 10) * 1000;
+      var gapMs = function () {
+        return (18 + Math.random() * 14) * 1000;
+      };
+      phraseTimer = setTimeout(function tick() {
+        phraseTimer = null;
+        if (fadeOutScheduled || !droneStarted || !phraseBus) return;
+        var ctx = ensureCtx();
+        var tPlay = ctx.currentTime + 0.04;
+        if (phraseNextPattern1) {
+          phrasePattern1(ctx, phraseBus, tPlay);
+        } else {
+          phrasePattern2(ctx, phraseBus, tPlay);
+        }
+        phraseNextPattern1 = !phraseNextPattern1;
+        phraseTimer = setTimeout(tick, gapMs());
+      }, firstDelayMs);
+    }
+
+    function createNoiseBuffer(ctx, sec) {
+      var len = Math.floor(ctx.sampleRate * sec);
+      var buf = ctx.createBuffer(1, len, ctx.sampleRate);
+      var d = buf.getChannelData(0);
+      var i;
+      for (i = 0; i < len; i++) {
+        d[i] = Math.random() * 2 - 1;
+      }
+      return buf;
+    }
+
+    function createReverbImpulseBuffer(ctx, duration, decay) {
+      var rate = ctx.sampleRate;
+      var len = Math.floor(rate * duration);
+      var buf = ctx.createBuffer(2, len, rate);
+      var ch;
+      for (ch = 0; ch < 2; ch++) {
+        var data = buf.getChannelData(ch);
+        var i;
+        var peak = 0;
+        for (i = 0; i < len; i++) {
+          var v = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
+          data[i] = v;
+          var a = Math.abs(v);
+          if (a > peak) peak = a;
+        }
+        if (peak > 0) {
+          for (i = 0; i < len; i++) {
+            data[i] /= peak * 2.2;
+          }
+        }
+      }
+      return buf;
+    }
+
+    function ensureCtx() {
+      if (!ac) {
+        ac = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      return ac;
+    }
+
+    async function resume() {
+      var c = ensureCtx();
+      if (c.state === "suspended") {
+        await c.resume();
+      }
+      return c;
+    }
+
+    async function playBootBeeps() {
+      var c = await resume();
+      ensureMaster(c);
+      var t = c.currentTime;
+      function beep(freq, tStart, dur) {
+        var o = c.createOscillator();
+        o.type = "square";
+        o.frequency.setValueAtTime(freq, tStart);
+        var g = c.createGain();
+        g.gain.setValueAtTime(0, tStart);
+        g.gain.linearRampToValueAtTime(0.088, tStart + 0.006);
+        g.gain.setValueAtTime(0.088, tStart + Math.max(0.006, dur - 0.012));
+        g.gain.linearRampToValueAtTime(0, tStart + dur);
+        o.connect(g);
+        g.connect(masterComp);
+        o.start(tStart);
+        o.stop(tStart + dur + 0.03);
+      }
+      beep(et12Hz(63), t, 0.08);
+      beep(et12Hz(75), t + 0.08 + 0.12, 0.08);
+    }
+
+    function startDrone() {
+      if (droneStarted) return;
+      droneStarted = true;
+      var c = ensureCtx();
+      ensureMaster(c);
+      if (c.state === "suspended") {
+        c.resume();
+      }
+      var t = c.currentTime;
+      var t1 = t + 2.7 + Math.random() * 0.8;
+      var t2 = t1 + 3.2 + Math.random() * 0.8;
+      var humDur = 3.2 + Math.random() * 0.8;
+      var tBrightEnd = Math.max(
+        t1 + 0.25,
+        t + (t2 - t) * 0.6 - 1
+      );
+      var freqs = [
+        et12Hz(63) / 4,
+        et12Hz(67) / 4,
+        et12Hz(70) / 4,
+      ];
+      var det = [3.5, -2.2, 1.8];
+      droneOscs = [];
+      var mix = c.createGain();
+      mix.gain.value = 0.5;
+      var i;
+      for (i = 0; i < 3; i++) {
+        var o = c.createOscillator();
+        o.type = "sawtooth";
+        o.frequency.setValueAtTime(freqs[i], t);
+        o.detune.setValueAtTime(det[i], t);
+        var og = c.createGain();
+        og.gain.value = 0.4125;
+        o.connect(og);
+        og.connect(mix);
+        o.start(t);
+        droneOscs.push(o);
+      }
+      droneTrem = c.createGain();
+      droneTrem.gain.value = 1.2;
+      mix.connect(droneTrem);
+      droneLfo = c.createOscillator();
+      droneLfo.type = "sine";
+      droneLfo.frequency.setValueAtTime(0.11, t);
+      var lfoD = c.createGain();
+      lfoD.gain.value = 0.028;
+      droneLfo.connect(lfoD);
+      lfoD.connect(droneTrem.gain);
+      droneLfo.start(t);
+
+      var subOsc = c.createOscillator();
+      subOsc.type = "sawtooth";
+      var subBase = (et12Hz(63) / 4) * 0.7;
+      subOsc.frequency.setValueAtTime(subBase, t);
+      subOsc.detune.setValueAtTime(5, t);
+      var subGain = c.createGain();
+      subGain.gain.setValueAtTime(0, t);
+      subOsc.connect(subGain);
+      subGain.connect(droneTrem);
+      subLfo1 = c.createOscillator();
+      subLfo1.type = "sine";
+      subLfo1.frequency.setValueAtTime(0.022, t);
+      var sg1 = c.createGain();
+      sg1.gain.value = 4.2;
+      subLfo1.connect(sg1);
+      sg1.connect(subOsc.frequency);
+      subLfo1.start(t);
+      subLfo2 = c.createOscillator();
+      subLfo2.type = "sine";
+      subLfo2.frequency.setValueAtTime(0.055, t);
+      var sg2 = c.createGain();
+      sg2.gain.value = 2.6;
+      subLfo2.connect(sg2);
+      sg2.connect(subOsc.frequency);
+      subLfo2.start(t);
+      subLfo3 = c.createOscillator();
+      subLfo3.type = "sine";
+      subLfo3.frequency.setValueAtTime(0.095, t);
+      var sg3 = c.createGain();
+      sg3.gain.value = 1.35;
+      subLfo3.connect(sg3);
+      sg3.connect(subOsc.frequency);
+      subLfo3.start(t);
+      subLfo4 = c.createOscillator();
+      subLfo4.type = "sine";
+      subLfo4.frequency.setValueAtTime(0.038, t);
+      var sg4 = c.createGain();
+      sg4.gain.value = 42;
+      subLfo4.connect(sg4);
+      sg4.connect(subOsc.detune);
+      subLfo4.start(t);
+      subOsc.start(t);
+      droneOscs.push(subOsc);
+
+      subGain.gain.setValueAtTime(0, t1);
+      subGain.gain.linearRampToValueAtTime(0.25, t1 + 1.55);
+      subGain.gain.setValueAtTime(0.25, t2);
+      subGain.gain.linearRampToValueAtTime(0.3, t2 + humDur * 0.35);
+      subGain.gain.linearRampToValueAtTime(0.2125, t2 + humDur);
+
+      droneLP = c.createBiquadFilter();
+      droneLP.type = "lowpass";
+      droneLP.Q.value = 0.85;
+      droneLP.frequency.setValueAtTime(11000, t);
+      dronePostGain = c.createGain();
+      dronePostGain.gain.setValueAtTime(1, t);
+      droneTrem.connect(droneLP);
+      droneLP.connect(dronePostGain);
+      var bassSwellGain = c.createGain();
+      bassSwellGain.gain.setValueAtTime(1.075, t);
+      dronePostGain.connect(bassSwellGain);
+      bassSwellLfo1 = c.createOscillator();
+      bassSwellLfo1.type = "sine";
+      bassSwellLfo1.frequency.setValueAtTime(0.014, t);
+      var bassSwellD1 = c.createGain();
+      bassSwellD1.gain.value = 0.15;
+      bassSwellLfo1.connect(bassSwellD1);
+      bassSwellD1.connect(bassSwellGain.gain);
+      bassSwellLfo1.start(t);
+      bassSwellLfo2 = c.createOscillator();
+      bassSwellLfo2.type = "sine";
+      bassSwellLfo2.frequency.setValueAtTime(0.026, t);
+      var bassSwellD2 = c.createGain();
+      bassSwellD2.gain.value = 0.1;
+      bassSwellLfo2.connect(bassSwellD2);
+      bassSwellD2.connect(bassSwellGain.gain);
+      bassSwellLfo2.start(t);
+      bassSwellLfo3 = c.createOscillator();
+      bassSwellLfo3.type = "sine";
+      bassSwellLfo3.frequency.setValueAtTime(0.009, t);
+      var bassSwellD3 = c.createGain();
+      bassSwellD3.gain.value = 0.07;
+      bassSwellLfo3.connect(bassSwellD3);
+      bassSwellD3.connect(bassSwellGain.gain);
+      bassSwellLfo3.start(t);
+      droneEnv = c.createGain();
+      droneEnv.gain.setValueAtTime(0, t);
+      bassSwellGain.connect(droneEnv);
+
+      var whaleOsc = c.createOscillator();
+      whaleOsc.type = "sine";
+      var whaleBase = et12Hz(63) / 4;
+      whaleOsc.frequency.setValueAtTime(whaleBase, t);
+      whaleOsc.detune.setValueAtTime(-11, t);
+      var whaleGain = c.createGain();
+      whaleGain.gain.setValueAtTime(0, t);
+      whaleOsc.connect(whaleGain);
+      whaleGain.connect(droneEnv);
+      whaleLfo1 = c.createOscillator();
+      whaleLfo1.type = "sine";
+      whaleLfo1.frequency.setValueAtTime(0.008, t);
+      var wlg1 = c.createGain();
+      wlg1.gain.value = 10;
+      whaleLfo1.connect(wlg1);
+      wlg1.connect(whaleOsc.frequency);
+      whaleLfo1.start(t);
+      whaleLfo2 = c.createOscillator();
+      whaleLfo2.type = "sine";
+      whaleLfo2.frequency.setValueAtTime(0.019, t);
+      var wlg2 = c.createGain();
+      wlg2.gain.value = 7;
+      whaleLfo2.connect(wlg2);
+      wlg2.connect(whaleOsc.frequency);
+      whaleLfo2.start(t);
+      whaleLfo3 = c.createOscillator();
+      whaleLfo3.type = "sine";
+      whaleLfo3.frequency.setValueAtTime(0.031, t);
+      var wlg3 = c.createGain();
+      wlg3.gain.value = 4.5;
+      whaleLfo3.connect(wlg3);
+      wlg3.connect(whaleOsc.frequency);
+      whaleLfo3.start(t);
+      whaleLfo4 = c.createOscillator();
+      whaleLfo4.type = "sine";
+      whaleLfo4.frequency.setValueAtTime(0.012, t);
+      var wlg4 = c.createGain();
+      wlg4.gain.value = 140;
+      whaleLfo4.connect(wlg4);
+      wlg4.connect(whaleOsc.detune);
+      whaleLfo4.start(t);
+      whaleOsc.start(t);
+      droneOscs.push(whaleOsc);
+
+      whaleGain.gain.setValueAtTime(0, tBrightEnd);
+      whaleGain.gain.linearRampToValueAtTime(0.2125, tBrightEnd + 2.6);
+      whaleGain.gain.setValueAtTime(0.2125, tBrightEnd + humDur * 0.25);
+      whaleGain.gain.linearRampToValueAtTime(0.15, tBrightEnd + humDur);
+
+      var nbuf = createNoiseBuffer(c, 2.5);
+      noiseSrc = c.createBufferSource();
+      noiseSrc.buffer = nbuf;
+      noiseSrc.loop = true;
+      var atmosBP = c.createBiquadFilter();
+      atmosBP.type = "bandpass";
+      atmosBP.Q.value = 0.65;
+      atmosBP.frequency.setValueAtTime(720, t);
+      var atmosLP = c.createBiquadFilter();
+      atmosLP.type = "lowpass";
+      atmosLP.Q.value = 0.7;
+      atmosLP.frequency.setValueAtTime(2400, t);
+      var atmosGain = c.createGain();
+      atmosGain.gain.setValueAtTime(0, t);
+      noiseSrc.connect(atmosBP);
+      atmosBP.connect(atmosLP);
+      atmosLP.connect(atmosGain);
+      atmosGain.connect(droneEnv);
+      phraseBus = c.createGain();
+      phraseBus.gain.value = 0.0385;
+
+      var phraseDry = c.createGain();
+      phraseDry.gain.value = 0.022;
+      var phraseDryLp = c.createBiquadFilter();
+      phraseDryLp.type = "lowpass";
+      phraseDryLp.frequency.value = 1400;
+      phraseDryLp.Q.value = 0.65;
+      phraseBus.connect(phraseDry);
+      phraseDry.connect(phraseDryLp);
+      phraseDryLp.connect(droneEnv);
+
+      var phraseDelaySum = c.createGain();
+      phraseBus.connect(phraseDelaySum);
+
+      var phraseDelay = c.createDelay(8.0);
+      phraseDelay.delayTime.value = 0.72;
+      var phraseDelayFb = c.createGain();
+      phraseDelayFb.gain.value = 0.5775;
+      phraseDelaySum.connect(phraseDelay);
+      phraseDelay.connect(phraseDelayFb);
+      phraseDelayFb.connect(phraseDelaySum);
+
+      var phraseDelay2 = c.createDelay(4.0);
+      phraseDelay2.delayTime.value = 0.42;
+      var phraseDelayTap = c.createGain();
+      phraseDelayTap.gain.value = 1.1275;
+      phraseDelay.connect(phraseDelayTap);
+      phraseDelayTap.connect(phraseDelay2);
+
+      var phrasePreRev = c.createBiquadFilter();
+      phrasePreRev.type = "highpass";
+      phrasePreRev.frequency.value = 180;
+      phrasePreRev.Q.value = 0.5;
+      phraseDelay2.connect(phrasePreRev);
+
+      var phraseRevIn = c.createGain();
+      phraseRevIn.gain.value = 1.1275;
+      phrasePreRev.connect(phraseRevIn);
+
+      var phraseConvolver = c.createConvolver();
+      phraseConvolver.buffer = createReverbImpulseBuffer(c, 6.2, 4.2);
+      phraseRevIn.connect(phraseConvolver);
+
+      var phraseWet = c.createGain();
+      phraseWet.gain.value = 1.1275;
+      phraseConvolver.connect(phraseWet);
+      phraseWet.connect(droneEnv);
+
+      noiseSrc.start(t);
+
+      atmosLfo = c.createOscillator();
+      atmosLfo.type = "sine";
+      atmosLfo.frequency.setValueAtTime(0.085, t);
+      var atmosLfoD = c.createGain();
+      atmosLfoD.gain.value = 180;
+      atmosLfo.connect(atmosLfoD);
+      atmosLfoD.connect(atmosBP.frequency);
+      atmosLfo.start(t);
+
+      atmosLfo2 = c.createOscillator();
+      atmosLfo2.type = "sine";
+      atmosLfo2.frequency.setValueAtTime(0.145, t);
+      var atmosLfoD2 = c.createGain();
+      atmosLfoD2.gain.value = 95;
+      atmosLfo2.connect(atmosLfoD2);
+      atmosLfoD2.connect(atmosLP.frequency);
+      atmosLfo2.start(t);
+
+      droneEnv.connect(masterComp);
+      droneEnv.gain.setValueAtTime(0, t);
+      droneEnv.gain.linearRampToValueAtTime(0.0475, t + 1.1);
+      droneEnv.gain.linearRampToValueAtTime(0.2, t + 4.4);
+
+      dronePostGain.gain.setValueAtTime(1, t1);
+      dronePostGain.gain.linearRampToValueAtTime(0.625, t1 + 0.45);
+
+      atmosGain.gain.setValueAtTime(0, t1);
+      atmosGain.gain.linearRampToValueAtTime(0.065, t1 + 2.2);
+
+      droneLP.frequency.setValueAtTime(11000, tBrightEnd);
+      droneLP.frequency.exponentialRampToValueAtTime(165, tBrightEnd + humDur);
+
+      atmosLP.frequency.cancelScheduledValues(tBrightEnd);
+      atmosLP.frequency.setValueAtTime(2400, tBrightEnd);
+      atmosLP.frequency.exponentialRampToValueAtTime(320, tBrightEnd + humDur);
+
+      atmosGain.gain.cancelScheduledValues(tBrightEnd);
+      atmosGain.gain.setValueAtTime(0.065, tBrightEnd);
+      atmosGain.gain.linearRampToValueAtTime(0.04, tBrightEnd + humDur);
+
+      phraseNextPattern1 = true;
+      schedulePhraseLoop();
+    }
+
+    function stopDroneOscillators(at) {
+      clearPhraseTimer();
+      var i;
+      for (i = 0; i < droneOscs.length; i++) {
+        try {
+          droneOscs[i].stop(at);
+        } catch (e) {}
+      }
+      droneOscs = [];
+      if (noiseSrc) {
+        try {
+          noiseSrc.stop(at);
+        } catch (e) {}
+        noiseSrc = null;
+      }
+      if (droneLfo) {
+        try {
+          droneLfo.stop(at);
+        } catch (e) {}
+        droneLfo = null;
+      }
+      if (atmosLfo) {
+        try {
+          atmosLfo.stop(at);
+        } catch (e) {}
+        atmosLfo = null;
+      }
+      if (atmosLfo2) {
+        try {
+          atmosLfo2.stop(at);
+        } catch (e) {}
+        atmosLfo2 = null;
+      }
+      if (subLfo1) {
+        try {
+          subLfo1.stop(at);
+        } catch (e) {}
+        subLfo1 = null;
+      }
+      if (subLfo2) {
+        try {
+          subLfo2.stop(at);
+        } catch (e) {}
+        subLfo2 = null;
+      }
+      if (subLfo3) {
+        try {
+          subLfo3.stop(at);
+        } catch (e) {}
+        subLfo3 = null;
+      }
+      if (subLfo4) {
+        try {
+          subLfo4.stop(at);
+        } catch (e) {}
+        subLfo4 = null;
+      }
+      if (whaleLfo1) {
+        try {
+          whaleLfo1.stop(at);
+        } catch (e) {}
+        whaleLfo1 = null;
+      }
+      if (whaleLfo2) {
+        try {
+          whaleLfo2.stop(at);
+        } catch (e) {}
+        whaleLfo2 = null;
+      }
+      if (whaleLfo3) {
+        try {
+          whaleLfo3.stop(at);
+        } catch (e) {}
+        whaleLfo3 = null;
+      }
+      if (whaleLfo4) {
+        try {
+          whaleLfo4.stop(at);
+        } catch (e) {}
+        whaleLfo4 = null;
+      }
+      if (bassSwellLfo1) {
+        try {
+          bassSwellLfo1.stop(at);
+        } catch (e) {}
+        bassSwellLfo1 = null;
+      }
+      if (bassSwellLfo2) {
+        try {
+          bassSwellLfo2.stop(at);
+        } catch (e) {}
+        bassSwellLfo2 = null;
+      }
+      if (bassSwellLfo3) {
+        try {
+          bassSwellLfo3.stop(at);
+        } catch (e) {}
+        bassSwellLfo3 = null;
+      }
+    }
+
+    function fadeDroneOut(seconds) {
+      if (fadeOutScheduled) return;
+      if (!droneEnv) return;
+      fadeOutScheduled = true;
+      clearPhraseTimer();
+      var c = ensureCtx();
+      var t = c.currentTime;
+      var dur = seconds || 4.5;
+      droneEnv.gain.cancelScheduledValues(t);
+      droneEnv.gain.setValueAtTime(droneEnv.gain.value, t);
+      droneEnv.gain.linearRampToValueAtTime(0, t + dur);
+      stopDroneOscillators(t + dur + 0.05);
+    }
+
+    function silenceNow() {
+      clearPhraseTimer();
+      fadeOutScheduled = true;
+      if (!droneEnv) return;
+      var c = ensureCtx();
+      var t = c.currentTime;
+      droneEnv.gain.cancelScheduledValues(t);
+      droneEnv.gain.setValueAtTime(0, t);
+      stopDroneOscillators(t + 0.02);
+    }
+
+    return {
+      playBootBeeps: playBootBeeps,
+      startDrone: startDrone,
+      fadeDroneOut: fadeDroneOut,
+      silenceNow: silenceNow,
+    };
+  })();
+
+  function sleep(ms) {
+    return new Promise(function (r) { setTimeout(r, ms); });
+  }
+
+  function rand(min, max) {
+    return min + Math.random() * (max - min);
+  }
+
+  function appendLine(html, className) {
+    const div = document.createElement("div");
+    div.className = "line" + (className ? " " + className : "");
+    div.innerHTML = html;
+    scroll.appendChild(div);
+    scroll.scrollTop = scroll.scrollHeight;
+    return div;
+  }
+
+  function appendRaw(text) {
+    appendLine(escapeHtml(text));
+  }
+
+  function escapeHtml(s) {
+    return s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+
+  const TITLE_STR = "WATCH-INATOR";
+
+  const FONT = {
+    W: ["#   #", "#   #", "#   #", "#   #", "# # #", "# # #", " # # "],
+    A: [" ### ", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"],
+    T: ["#####", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  "],
+    C: [" ### ", "#   #", "#    ", "#    ", "#    ", "#   #", " ### "],
+    H: ["#   #", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"],
+    I: ["#####", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", "#####"],
+    "-": ["     ", "     ", "     ", " ### ", "     ", "     ", "     "],
+    N: ["#   #", "##  #", "# # #", "#  ##", "#   #", "#   #", "#   #"],
+    O: [" ### ", "#   #", "#   #", "#   #", "#   #", "#   #", " ### "],
+    R: ["###  ", "#   #", "#   #", "###  ", "# #  ", "#  # ", "#   #"],
+  };
+
+  function buildTitleLayout(scale, gap) {
+    var rows = [];
+    var r;
+    for (r = 0; r < 7; r++) {
+      rows[r] = [];
+    }
+    var xOff = 0;
+    var i;
+    for (i = 0; i < TITLE_STR.length; i++) {
+      var ch = TITLE_STR.charAt(i);
+      var g = FONT[ch];
+      if (!g) continue;
+      for (r = 0; r < 7; r++) {
+        var rowStr = g[r];
+        var c;
+        for (c = 0; c < 5; c++) {
+          if (rowStr.charAt(c) === "#") {
+            rows[r].push({
+              x0: xOff + c * scale,
+              x1: xOff + (c + 1) * scale,
+              y0: r * scale,
+              y1: (r + 1) * scale,
+            });
+          }
+        }
+      }
+      xOff += 5 * scale + gap;
+    }
+    var totalW = xOff - gap;
+    var totalH = 7 * scale;
+    return { rows: rows, totalW: totalW, totalH: totalH };
+  }
+
+  function shuffleArray(arr) {
+    var i;
+    for (i = arr.length - 1; i > 0; i--) {
+      var j = (Math.random() * (i + 1)) | 0;
+      var t = arr[i];
+      arr[i] = arr[j];
+      arr[j] = t;
+    }
+    return arr;
+  }
+
+  function finalizeTitleLayout(layout) {
+    var flat = [];
+    var rr;
+    var br;
+    for (rr = 0; rr < 7; rr++) {
+      for (br = 0; br < layout.rows[rr].length; br++) {
+        flat.push(layout.rows[rr][br]);
+      }
+    }
+    var n = flat.length;
+    if (n < 1) {
+      layout.misalignedRects = [];
+      return;
+    }
+    var pct = 0.1 + Math.random() * 0.2;
+    var k = Math.max(1, Math.round(n * pct));
+    k = Math.min(k, n);
+    var indices = [];
+    var i;
+    for (i = 0; i < n; i++) indices.push(i);
+    shuffleArray(indices);
+    layout.misalignedRects = [];
+    for (i = 0; i < k; i++) {
+      var r = flat[indices[i]];
+      r.misaligned = true;
+      r.mx = ((Math.random() * 7) | 0) - 3;
+      r.my = ((Math.random() * 5) | 0) - 2;
+      if (r.mx === 0 && r.my === 0) {
+        r.mx = Math.random() < 0.5 ? -2 : 2;
+      }
+      layout.misalignedRects.push(r);
+    }
+  }
+
+  function mountHeroTitle(layout, scale, gap) {
+    if (!heroTitleEl) return;
+    heroTitleEl.innerHTML = "";
+    heroTitleEl.className = "hero-title hero-title--matrix";
+    heroTitleEl.style.setProperty("--pixel", scale + "px");
+    heroTitleEl.style.setProperty("--gap", gap + "px");
+    heroTitleEl.setAttribute("aria-label", "Watch-inator");
+    var glow = document.createElement("div");
+    glow.className = "hero-title-glow";
+    var glowSec = 10.4 + Math.random() * 5.5;
+    glow.style.setProperty("--glow-dur", glowSec.toFixed(2) + "s");
+    glow.style.setProperty(
+      "--glow-delay",
+      (-Math.random() * glowSec).toFixed(2) + "s"
+    );
+    heroTitleEl.appendChild(glow);
+    var rowIdx = [];
+    var r;
+    for (r = 0; r < 7; r++) {
+      rowIdx[r] = 0;
+    }
+    var i;
+    for (i = 0; i < TITLE_STR.length; i++) {
+      var ch = TITLE_STR.charAt(i);
+      var g = FONT[ch];
+      if (!g) continue;
+      var letterEl = document.createElement("div");
+      letterEl.className = "hero-letter";
+      letterEl.setAttribute("aria-hidden", "true");
+      for (r = 0; r < 7; r++) {
+        var cs;
+        for (cs = 0; cs < 5; cs++) {
+          if (g[r].charAt(cs) === "#") {
+            var rect = layout.rows[r][rowIdx[r]++];
+            var span = document.createElement("span");
+            span.className = "hero-pixel";
+            span.style.gridColumn = cs + 1;
+            span.style.gridRow = r + 1;
+            rect.el = span;
+            if (rect.misaligned) {
+              span.classList.add("mis");
+            }
+            span.style.setProperty("--mx", (rect.mx || 0) + "px");
+            span.style.setProperty("--my", (rect.my || 0) + "px");
+            letterEl.appendChild(span);
+          }
+        }
+      }
+      glow.appendChild(letterEl);
+    }
+  }
+
+  function syncHeroPixels(layout) {
+    if (!layout || !layout.rows) return;
+    var rr;
+    for (rr = 0; rr < 7; rr++) {
+      var rowRects = layout.rows[rr];
+      var br;
+      for (br = 0; br < rowRects.length; br++) {
+        var rect = rowRects[br];
+        if (!rect.el) continue;
+        rect.el.style.setProperty("--mx", (rect.mx || 0) + "px");
+        rect.el.style.setProperty("--my", (rect.my || 0) + "px");
+        if (rect.misaligned) {
+          rect.el.classList.add("mis");
+        } else {
+          rect.el.classList.remove("mis");
+        }
+      }
+    }
+  }
+
+  function initParticles(w, h, titleBox) {
+    var n = 72;
+    var padX = 52;
+    var padY = 48;
+    var list = [];
+    var i;
+    for (i = 0; i < n; i++) {
+      var extended = Math.random() < 0.38;
+      var minX;
+      var maxX;
+      var minY;
+      var maxY;
+      if (extended) {
+        var ex = 160 + Math.random() * 220;
+        minX = Math.max(-120, titleBox.x - ex);
+        maxX = Math.min(w + 120, titleBox.x + titleBox.w + ex);
+        minY = Math.max(-100, titleBox.y - ex * 0.55);
+        maxY = Math.min(h * 0.62, titleBox.y + titleBox.h + ex * 0.45);
+      } else {
+        minX = titleBox.x - padX;
+        maxX = titleBox.x + titleBox.w + padX;
+        minY = titleBox.y - padY;
+        maxY = titleBox.y + titleBox.h + padY;
+      }
+      list.push({
+        x: rand(minX, maxX),
+        y: rand(minY, maxY),
+        vx: rand(-0.35, 0.35) * 0.5,
+        vy: rand(-0.22, 0.12) * 0.5,
+        s: rand(0.5, 1.5),
+        a: rand(0.06, 0.22),
+        minX: minX,
+        maxX: maxX,
+        minY: minY,
+        maxY: maxY,
+      });
+    }
+    return list;
+  }
+
+  const BOOT_TAG = {
+    ok: { prefix: "[ OK ]", color: "#4caf50" },
+    warn: { prefix: "[ WARN ]", color: "#ffeb3b" },
+    info: { prefix: "[ INFO ]", color: "#40c4ff" },
+  };
+
+  const GARBLE_CHARS =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#$%&*[]{}<>?/\\|";
+
+  function garbleText(s) {
+    var out = "";
+    var i;
+    for (i = 0; i < s.length; i++) {
+      var ch = s.charAt(i);
+      if (ch === " ") out += " ";
+      else out += GARBLE_CHARS[(Math.random() * GARBLE_CHARS.length) | 0];
+    }
+    return out;
+  }
+
+  function makeQrMatrix(n) {
+    var m = [];
+    var y;
+    var x;
+    for (y = 0; y < n; y++) {
+      m[y] = [];
+      for (x = 0; x < n; x++) {
+        m[y][x] = ((x * 13 + y * 7 + 3) % 5 === 0) ? 1 : 0;
+      }
+    }
+    function finder(x0, y0) {
+      var yy;
+      var xx;
+      for (yy = 0; yy < 7; yy++) {
+        for (xx = 0; xx < 7; xx++) {
+          var on =
+            xx === 0 ||
+            xx === 6 ||
+            yy === 0 ||
+            yy === 6 ||
+            (xx >= 2 &&
+              xx <= 4 &&
+              yy >= 2 &&
+              yy <= 4);
+          m[y0 + yy][x0 + xx] = on ? 1 : 0;
+        }
+      }
+    }
+    finder(0, 0);
+    finder(n - 7, 0);
+    finder(0, n - 7);
+    return m;
+  }
+
+  function initBootScene(w, h, titleBox) {
+    var SIDE_W = 216;
+    var sidebarX = w - SIDE_W;
+    var logLineH = Math.round(11 * 1.75);
+    var logStartY = titleBox.verY + titleBox.verH + 40;
+    var sidebarTop = logStartY;
+    var mainPad = 14;
+    var cell = 5;
+    var qrN = 21;
+    var qrW = qrN * cell;
+    var qrLeft = sidebarX + (SIDE_W - qrW) / 2;
+    var qrTop = sidebarTop + 8;
+    var qrMatrix = makeQrMatrix(qrN);
+    var qrBottom = qrTop + qrN * cell;
+    var netY = qrBottom + 12;
+    var sideNet1 = ">> WATCH-INATOR-SETUP";
+    var sideNet2 = "IPv4   192.168.4.1:80";
+    var scanY = netY + logLineH + 4;
+    var statusY = scanY + logLineH + 8;
+    var statusSize = 10;
+    var sideCharPace = 6.2;
+
+    var templates = [
+      { kind: "ok", body: "kernel modules loaded" },
+      { kind: "ok", body: "HDMI output -- 1920x1080 @ 60Hz" },
+      { kind: "ok", body: "filesystem mounted (read/write)" },
+      { kind: "info", body: "loading Chromium kiosk engine..." },
+      { kind: "ok", body: "kiosk engine ready" },
+      { kind: "ok", body: "hardlock module: ARMED" },
+      { kind: "ok", body: "popup blocker: ACTIVE" },
+      { kind: "warn", body: "no target URL -- awaiting config" },
+      { kind: "ok", body: "hotspot WATCH-INATOR-SETUP online" },
+      { kind: "ok", body: "config server live -- 192.168.4.1:80" },
+    ];
+
+    var bootLines = [];
+    var i;
+    for (i = 0; i < templates.length; i++) {
+      var t = templates[i];
+      var tag = BOOT_TAG[t.kind];
+      var fullText = tag.prefix + "   " + t.body;
+      bootLines.push({
+        kind: t.kind,
+        fullText: fullText,
+        prefix: tag.prefix,
+        body: t.body,
+        color: tag.color,
+        garble: Math.random() < 0.28,
+        garbleT0: null,
+        garbleSnap: "",
+        crossed: false,
+        lineTop: logStartY + i * logLineH,
+        lineBottom: logStartY + (i + 1) * logLineH,
+      });
+    }
+
+    var lastLogBottom = bootLines[bootLines.length - 1].lineBottom;
+    var sidebarBottom = statusY + Math.max(statusSize, 14) + 18;
+    var barZoneTop = Math.max(lastLogBottom, sidebarBottom) + 200;
+    if (barZoneTop > h - 100) {
+      barZoneTop = Math.max(lastLogBottom + 120, h * 0.62);
+    }
+
+    return {
+      bootLines: bootLines,
+      sidebarX: sidebarX,
+      sidebarTop: sidebarTop,
+      logLineH: logLineH,
+      logStartY: logStartY,
+      mainPad: mainPad,
+      sideCharPace: sideCharPace,
+      qr: {
+        matrix: qrMatrix,
+        n: qrN,
+        cell: cell,
+        left: qrLeft,
+        top: qrTop,
+        bottom: qrBottom,
+      },
+      sideNet1: sideNet1,
+      sideNet2: sideNet2,
+      netY: netY,
+      scanY: scanY,
+      statusY: statusY,
+      statusSize: statusSize,
+      sideW: SIDE_W,
+      barZoneTop: barZoneTop,
+      lastLogBottom: lastLogBottom,
+    };
+  }
+
+  var PHRASE_POOL = [
+    "Buttering the toast...",
+    "Setting the table...",
+    "Awesoming everything...",
+    "Preheating the oven...",
+    "Chopping the onions...",
+    "Thinging the thing...",
+    "Spinning the spinners...",
+    "Untangling the internet...",
+    "Feeding the hamsters...",
+    "Boiling the kettle...",
+    "Finding Waldo...",
+    "Asking nicely...",
+    "Doing the thing...",
+    "Finding the remote...",
+    "Remembering that summer...",
+    "Holding in farts...",
+    "beep boop...",
+    "Manifesting...",
+  ];
+
+  function pickThreePhrases() {
+    var pool = PHRASE_POOL;
+    var n = pool.length;
+    var tries = 0;
+    while (tries < 800) {
+      var idx = [];
+      while (idx.length < 3) {
+        var r = (Math.random() * n) | 0;
+        if (idx.indexOf(r) < 0) {
+          idx.push(r);
+        }
+      }
+      idx.sort(function (a, b) {
+        return a - b;
+      });
+      if (idx[1] !== idx[0] + 1 && idx[2] !== idx[1] + 1) {
+        var order = [0, 1, 2];
+        shuffleArray(order);
+        return [
+          pool[idx[order[0]]],
+          pool[idx[order[1]]],
+          pool[idx[order[2]]],
+        ];
+      }
+      tries++;
+    }
+    return [pool[0], pool[4], pool[9]];
+  }
+
+  function createLoadingBarState() {
+    return {
+      entered: false,
+      phase: 1,
+      filled: 0,
+      total: 0,
+      barW: 0,
+      nextChunkAt: 0,
+      stutterDone: false,
+      frozen: false,
+      freezeUntil: 0,
+      phrases: ["", "", ""],
+      showSystems: false,
+      showLaunch: false,
+      systemsAt: 0,
+      launchAt: 0,
+      doneAt: 0,
+      done: false,
+    };
+  }
+
+  function updateLoadingBar(now, st) {
+    if (st.done || !st.entered) return;
+    var t = st.total;
+    if (t < 1) return;
+    var cap1 = Math.max(1, Math.floor(t / 3));
+    var cap2 = Math.max(cap1 + 1, Math.floor((2 * t) / 3));
+    var cap3 = Math.max(cap2 + 1, Math.floor(0.8 * t));
+    if (cap3 >= t) {
+      cap3 = Math.max(cap2 + 1, t - 1);
+    }
+
+    if (st.phase === 4) {
+      if (now >= st.systemsAt && !st.showSystems) {
+        st.showSystems = true;
+        st.launchAt = now + 900;
+      }
+      if (st.showSystems && now >= st.launchAt && !st.showLaunch) {
+        st.showLaunch = true;
+        st.doneAt = now + 1500;
+      }
+      if (st.showLaunch && now >= st.doneAt) {
+        st.done = true;
+      }
+      return;
+    }
+
+    if (st.phase === 3) {
+      if (st.frozen) {
+        if (now >= st.freezeUntil) {
+          st.filled = t;
+          st.frozen = false;
+          st.phase = 4;
+          st.systemsAt = now + 600;
+        }
+        return;
+      }
+      if (now < st.nextChunkAt) return;
+      if (st.filled < cap3) {
+        st.filled = Math.min(cap3, st.filled + 1);
+        st.nextChunkAt = now + 52 + Math.random() * 28;
+        if (st.filled >= cap3) {
+          st.frozen = true;
+          st.freezeUntil = now + 3600;
+        }
+      }
+      return;
+    }
+
+    if (st.phase === 2) {
+      if (now < st.nextChunkAt) return;
+      var mid = cap1 + Math.floor((cap2 - cap1) / 2);
+      if (!st.stutterDone && st.filled >= mid) {
+        st.filled = Math.max(cap1, st.filled - 2);
+        st.stutterDone = true;
+        st.nextChunkAt = now + 190;
+        return;
+      }
+      if (st.filled < cap2) {
+        st.filled = Math.min(cap2, st.filled + 1);
+        st.nextChunkAt = now + 48 + Math.random() * 24;
+      } else {
+        st.phase = 3;
+        st.frozen = false;
+        st.nextChunkAt = now;
+      }
+      return;
+    }
+
+    if (st.phase === 1) {
+      if (now < st.nextChunkAt) return;
+      if (st.filled < cap1) {
+        st.filled = Math.min(cap1, st.filled + 1);
+        st.nextChunkAt = now + 44 + Math.random() * 18;
+      } else {
+        st.phase = 2;
+        st.stutterDone = false;
+        st.nextChunkAt = now + 140;
+      }
+    }
+  }
+
+  function drawPixelLoadingBar(ctx, w, barZoneTop, now, st, lastLogBottom) {
+    if (!st.entered || st.done) return;
+    var blockW = 5;
+    var blockH = 8;
+    var gap = 1;
+    var pitch = blockW + gap;
+    var linePad = 8;
+    var minAnchor =
+      typeof lastLogBottom === "number" ? lastLogBottom + 14 : 0;
+    var idealAnchor = barZoneTop - 168;
+    var anchorTop = Math.max(idealAnchor, minAnchor);
+    var barY = anchorTop + 58;
+    if (barY + blockH > barZoneTop - linePad) {
+      barY = barZoneTop - linePad - blockH;
+      anchorTop = barY - 58;
+      if (anchorTop < minAnchor) {
+        anchorTop = minAnchor;
+        barY = anchorTop + 58;
+      }
+    }
+    var cx = w / 2;
+    ctx.font = '11px "Share Tech Mono", monospace';
+    ctx.textBaseline = "top";
+    ctx.textAlign = "center";
+
+    var spinFrames = ["|", "/", "-", "\\"];
+    var spin = spinFrames[(Math.floor(now / 160) % 4 + 4) % 4];
+    ctx.fillStyle = "#00e676";
+    ctx.fillText(spin, cx, anchorTop);
+
+    var phrase = "";
+    if (st.phase === 1) phrase = st.phrases[0];
+    else if (st.phase === 2) phrase = st.phrases[1];
+    else if (st.phase === 3) phrase = st.phrases[2];
+    else if (st.phase === 4) phrase = st.phrases[2];
+    if (phrase) {
+      ctx.fillStyle = "#81c784";
+      ctx.fillText(phrase, cx, anchorTop + 20);
+    }
+
+    var x0 = cx - st.barW / 2;
+    var i;
+    for (i = 0; i < st.total; i++) {
+      if (i < st.filled) {
+        ctx.fillStyle = "#00e676";
+        ctx.fillRect(x0 + i * pitch, barY, blockW, blockH);
+      }
+    }
+
+    if (st.showSystems) {
+      ctx.fillStyle = "#00e676";
+      ctx.fillText("systems go.", cx, barY + blockH + 14);
+    }
+    if (st.showLaunch) {
+      ctx.fillStyle = "#00e676";
+      ctx.fillText(">> LAUNCHING KIOSK ENGINE...", cx, barY + blockH + 32);
+    }
+  }
+
+  function drawBootLine(ctx, bl, lineY, now, mainLeft) {
+    if (bl.lineTop >= lineY) return;
+    var showGarble =
+      bl.garble &&
+      bl.garbleT0 !== null &&
+      now - bl.garbleT0 < 280;
+    ctx.font = '11px "Share Tech Mono", monospace';
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    if (showGarble) {
+      ctx.fillStyle = "#00e676";
+      ctx.fillText(bl.garbleSnap || "", mainLeft, bl.lineTop);
+      return;
+    }
+    var tag = BOOT_TAG[bl.kind];
+    var pref = tag.prefix;
+    var pw = ctx.measureText(pref).width;
+    ctx.fillStyle = tag.color;
+    ctx.fillText(pref, mainLeft, bl.lineTop);
+    ctx.fillStyle = "#81c784";
+    ctx.fillText("   " + bl.body, mainLeft + pw, bl.lineTop);
+  }
+
+  function drawSidebarQr(ctx, scene, lineY) {
+    var qr = scene.qr;
+    var c = qr.cell;
+    var n = qr.n;
+    var r;
+    var col;
+    for (r = 0; r < n; r++) {
+      var rowTop = qr.top + r * c;
+      var rowBottom = rowTop + c;
+      if (rowTop >= lineY) break;
+      var visBottom = Math.min(rowBottom, lineY);
+      if (visBottom <= rowTop) continue;
+      for (col = 0; col < n; col++) {
+        if (!qr.matrix[r][col]) continue;
+        var px = qr.left + col * c;
+        ctx.fillStyle = "#00e676";
+        ctx.fillRect(px, rowTop, c, visBottom - rowTop);
+      }
+    }
+  }
+
+  function drawSidebar(
+    ctx,
+    scene,
+    lineY,
+    now,
+    netChars,
+    scanChars
+  ) {
+    var sx = scene.sidebarX;
+    var pad = 8;
+    if (lineY > scene.sidebarTop + 1) {
+      ctx.fillStyle = "#162216";
+      var bh = Math.max(0, lineY - scene.sidebarTop);
+      ctx.fillRect(sx, scene.sidebarTop, 1, bh);
+    }
+    drawSidebarQr(ctx, scene, lineY);
+    ctx.font = '11px "Share Tech Mono", monospace';
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    var s1 = scene.sideNet1;
+    var s2 = scene.sideNet2;
+    var len1 = s1.length;
+    var len2 = s2.length;
+    if (lineY > scene.netY && netChars > 0) {
+      ctx.fillStyle = "#81c784";
+      ctx.fillText(s1.slice(0, netChars), sx + pad, scene.netY);
+    }
+    if (netChars >= len1 && lineY > scene.scanY && scanChars > 0) {
+      ctx.fillStyle = "#00e676";
+      ctx.fillText(s2.slice(0, scanChars), sx + pad, scene.scanY);
+    }
+    var sideTextDone = netChars >= len1 && scanChars >= len2;
+    if (sideTextDone && lineY > scene.statusY + 2) {
+      var pulse = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(now / 210));
+      var sq = scene.statusSize;
+      var sy = scene.statusY;
+      ctx.save();
+      ctx.shadowColor = "rgba(0, 230, 118, 0.75)";
+      ctx.shadowBlur = 8 + 7 * pulse;
+      ctx.fillStyle = "rgba(0, 230, 118, " + (0.5 + 0.38 * pulse) + ")";
+      ctx.fillRect(sx + pad, sy, sq, sq);
+      ctx.restore();
+      ctx.fillStyle = "#81c784";
+      ctx.fillText("awaiting config", sx + pad + sq + 8, sy + 1);
+    }
+  }
+
+  function drawTitlePixels(ctx, cx, ty, layout, lineY, fillStyle, dx, options) {
+    dx = dx || 0;
+    options = options || {};
+    var misOnly = options.misalignedOnly;
+    var band = options.band;
+    if (!layout.rows) return;
+    var rr;
+    for (rr = 0; rr < 7; rr++) {
+      var rowRects = layout.rows[rr];
+      var br;
+      for (br = 0; br < rowRects.length; br++) {
+        var rect = rowRects[br];
+        if (misOnly && !rect.misaligned) continue;
+        var mx = rect.mx || 0;
+        var my = rect.my || 0;
+        var py0 = ty + rect.y0 + my;
+        var rw = rect.x1 - rect.x0;
+        var rh = rect.y1 - rect.y0;
+        var x0 = cx + rect.x0 + dx + mx;
+        if (band) {
+          var py1 = py0 + rh;
+          if (py1 <= band.y0 || py0 >= band.y1) continue;
+        }
+        if (py0 >= lineY) continue;
+        var vh = Math.min(rh, lineY - py0);
+        if (vh <= 0) continue;
+        ctx.fillStyle = fillStyle;
+        ctx.fillRect(x0, py0, rw, vh);
+        if (vh >= 2) {
+          ctx.fillStyle = "rgba(200, 255, 230, 0.28)";
+          ctx.fillRect(x0, py0, rw, 1);
+          ctx.fillStyle = fillStyle;
+        }
+      }
+    }
+  }
+
+  async function runScanline() {
+    var layout = null;
+    var titleBox = { x: 0, y: 0, w: 0, h: 0, verY: 0, verH: 14 };
+    var particles = [];
+    var lineY = 0;
+    var speed = 38 * 1.3;
+    var last = performance.now();
+    var titleLoaded = false;
+    var glitchScheduled = false;
+    var glitchDone = false;
+    var glitch = null;
+    var glitchEnd = 0;
+    var ctx = null;
+    var w = window.innerWidth;
+    var h = window.innerHeight;
+    var bootScene = null;
+    var netChars = 0;
+    var scanChars = 0;
+    var loadBar = createLoadingBarState();
+    var targetRevealed = false;
+    var scanlineComplete = false;
+    var LINE_EXIT_PAD = 32;
+
+    function setupCanvas() {
+      var dpr = Math.min(window.devicePixelRatio || 1, 2);
+      w = window.innerWidth;
+      h = window.innerHeight;
+      canvas.width = Math.floor(w * dpr);
+      canvas.height = Math.floor(h * dpr);
+      canvas.style.width = w + "px";
+      canvas.style.height = h + "px";
+      ctx = canvas.getContext("2d");
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      layout = null;
+      bootScene = null;
+      lineY = 0;
+      titleLoaded = false;
+      glitchScheduled = false;
+      glitchDone = false;
+      particles = [];
+      netChars = 0;
+      scanChars = 0;
+      loadBar = createLoadingBarState();
+      targetRevealed = false;
+      scanlineComplete = false;
+      if (targetFrame) {
+        targetFrame.classList.remove("target-front");
+      }
+      stage.style.clipPath = "";
+      stage.classList.remove("scanline-boot");
+      stage.style.display = "";
+      canvas.style.display = "";
+      if (heroClip) {
+        heroClip.style.display = "";
+      }
+      if (heroTitleEl) {
+        heroTitleEl.innerHTML = "";
+      }
+    }
+
+    function scheduleGlitch() {
+      if (glitchScheduled || glitchDone) return;
+      glitchScheduled = true;
+      var delay = rand(1000, 5000);
+      setTimeout(function () {
+        if (glitchDone || !layout) return;
+        var sliceH = rand(18, Math.min(56, layout.totalH * 0.45));
+        var titleTop = titleBox.y;
+        var titleBottom = titleBox.y + layout.totalH;
+        var centerY;
+        if (layout.misalignedRects && layout.misalignedRects.length > 0) {
+          var pick =
+            layout.misalignedRects[
+              (Math.random() * layout.misalignedRects.length) | 0
+            ];
+          centerY =
+            titleBox.y +
+            (pick.y0 + pick.y1) / 2 +
+            (pick.my || 0);
+        } else {
+          centerY = titleBox.y + layout.totalH * 0.5;
+        }
+        var top = centerY - sliceH / 2;
+        if (top < titleTop) top = titleTop;
+        if (top + sliceH > titleBottom) top = titleBottom - sliceH;
+        if (top < titleTop) top = titleTop;
+        glitch = {
+          y0: top,
+          y1: top + sliceH,
+          ox: rand(3, 7) * (Math.random() < 0.5 ? -1 : 1),
+        };
+        glitchEnd = performance.now() + rand(220, 380);
+      }, delay);
+    }
+
+    function frame(now) {
+      if (!ctx || scanlineComplete) return;
+      var dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+
+      if (!layout) {
+        var scale = Math.max(3, Math.floor(Math.min(w, h) / 55));
+        var gap = Math.max(2, Math.floor(scale / 2));
+        layout = buildTitleLayout(scale, gap);
+        finalizeTitleLayout(layout);
+        mountHeroTitle(layout, scale, gap);
+        var ix = (w - layout.totalW) / 2;
+        var iy = h * 0.2;
+        titleBox.x = ix;
+        titleBox.y = iy;
+        titleBox.w = layout.totalW;
+        titleBox.h = layout.totalH;
+        titleBox.verY = iy + layout.totalH + Math.floor(scale * 1.2);
+        titleBox.verH =
+          Math.ceil(11 * 1.5) + 6 + Math.ceil(10 * 1.35);
+        particles = initParticles(w, h, titleBox);
+        bootScene = initBootScene(w, h, titleBox);
+        if (heroStack) {
+          var stackW = Math.max(layout.totalW, Math.min(420, w - 28));
+          heroStack.style.width = stackW + "px";
+          heroStack.style.left = (w - stackW) / 2 + "px";
+          heroStack.style.top = iy + "px";
+        }
+        if (heroTaglineEl) {
+          heroTaglineEl.style.marginTop = Math.floor(scale * 1.2) + "px";
+        }
+        if (heroVersionEl) {
+          heroVersionEl.textContent = CONFIG.VERSION || "";
+        }
+      }
+
+      var loadingPause =
+        bootScene && loadBar.entered && !loadBar.done;
+      if (!loadingPause) {
+        lineY += speed * dt;
+        var maxLineY = loadBar.done
+          ? h + LINE_EXIT_PAD + 10
+          : h + 40;
+        if (lineY > maxLineY) lineY = maxLineY;
+      }
+
+      if (bootScene && !loadBar.entered && lineY >= bootScene.barZoneTop) {
+        lineY = bootScene.barZoneTop;
+        loadBar.entered = true;
+        loadBar.phrases = pickThreePhrases();
+        var pitch = 6;
+        var maxBarPx = Math.min(400, w - 28);
+        loadBar.total = Math.max(9, Math.floor((maxBarPx + 1) / pitch));
+        loadBar.barW = loadBar.total * pitch - 1;
+        loadBar.filled = 0;
+        loadBar.phase = 1;
+        loadBar.stutterDone = false;
+        loadBar.frozen = false;
+        loadBar.showSystems = false;
+        loadBar.showLaunch = false;
+        loadBar.nextChunkAt = now;
+      }
+
+      if (bootScene && loadBar.entered && !loadBar.done) {
+        lineY = bootScene.barZoneTop;
+        updateLoadingBar(now, loadBar);
+      }
+
+      if (layout && lineY >= titleBox.y) {
+        BootAudio.startDrone();
+      }
+
+      var drawClipH;
+      if (!loadBar.done) {
+        drawClipH = lineY;
+      } else if (lineY <= h) {
+        drawClipH = lineY;
+      } else {
+        var u = (lineY - h) / LINE_EXIT_PAD;
+        if (u > 1) u = 1;
+        drawClipH = Math.max(0, h * (1 - u));
+      }
+
+      if (loadBar.done) {
+        stage.style.clipPath =
+          "polygon(0px 0px, 100% 0px, 100% " + drawClipH + "px, 0px " + drawClipH + "px)";
+      } else {
+        stage.style.clipPath = "";
+      }
+
+      if (layout && heroClip) {
+        heroClip.style.height = Math.min(drawClipH, h) + "px";
+      }
+      if (layout) {
+        syncHeroPixels(layout);
+      }
+
+      var lineThickness = 2;
+      var darkStart = lineY + lineThickness;
+      var cx = titleBox.x;
+      var ty = titleBox.y;
+
+      if (bootScene) {
+        var bx;
+        for (bx = 0; bx < bootScene.bootLines.length; bx++) {
+          var bline = bootScene.bootLines[bx];
+          if (!bline.crossed && lineY >= bline.lineBottom) {
+            bline.crossed = true;
+            if (bline.garble) {
+              bline.garbleT0 = now;
+              bline.garbleSnap = garbleText(bline.fullText);
+            }
+          }
+        }
+        var pace = bootScene.sideCharPace || 6.2;
+        var qrB = bootScene.qr.bottom + 2;
+        var l1 = bootScene.netY;
+        var l2 = bootScene.scanY;
+        var s1 = bootScene.sideNet1;
+        var s2 = bootScene.sideNet2;
+        if (lineY <= qrB || lineY <= l1) {
+          netChars = 0;
+          scanChars = 0;
+        } else {
+          netChars = Math.min(s1.length, Math.ceil((lineY - l1) / pace));
+          if (netChars < s1.length) {
+            scanChars = 0;
+          } else if (lineY <= l2) {
+            scanChars = 0;
+          } else {
+            scanChars = Math.min(s2.length, Math.ceil((lineY - l2) / pace));
+          }
+        }
+      }
+
+      ctx.clearRect(0, 0, w, Math.max(lineY, h + LINE_EXIT_PAD + 4));
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, w, drawClipH);
+      ctx.clip();
+
+      ctx.fillStyle = "#030806";
+      ctx.fillRect(0, 0, w, drawClipH);
+
+      var j;
+      for (j = 0; j < particles.length; j++) {
+        var p = particles[j];
+        p.x += p.vx * (30 * dt);
+        p.y += p.vy * (30 * dt);
+        if (p.x < p.minX) p.x = p.maxX;
+        else if (p.x > p.maxX) p.x = p.minX;
+        if (p.y < p.minY) p.y = p.maxY;
+        else if (p.y > p.maxY) p.y = p.minY;
+        p.vx += rand(-0.01, 0.01);
+        p.vy -= 0.008 * (30 * dt);
+        if (p.vy < -0.35) p.vy = -0.35;
+      }
+
+      for (j = 0; j < particles.length; j++) {
+        var q = particles[j];
+        if (q.y >= lineY) continue;
+        ctx.fillStyle = "rgba(0, 230, 118, " + q.a + ")";
+        ctx.fillRect(q.x, q.y, q.s, q.s);
+      }
+
+      if (bootScene) {
+        var mainLeft = bootScene.mainPad;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, Math.max(0, bootScene.sidebarX - 4), lineY);
+        ctx.clip();
+        var bi2;
+        for (bi2 = 0; bi2 < bootScene.bootLines.length; bi2++) {
+          drawBootLine(ctx, bootScene.bootLines[bi2], lineY, now, mainLeft);
+        }
+        ctx.restore();
+        drawSidebar(ctx, bootScene, lineY, now, netChars, scanChars);
+        drawPixelLoadingBar(
+          ctx,
+          w,
+          bootScene.barZoneTop,
+          now,
+          loadBar,
+          bootScene.lastLogBottom
+        );
+      }
+
+      if (glitch && now < glitchEnd) {
+        var gy0 = glitch.y0;
+        var gy1 = glitch.y1;
+        var ox = glitch.ox;
+        var gband = { y0: gy0, y1: gy1 };
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, gy0, w, gy1 - gy0);
+        ctx.clip();
+        ctx.globalCompositeOperation = "screen";
+        ctx.globalAlpha = 0.5;
+        drawTitlePixels(
+          ctx,
+          cx,
+          ty,
+          layout,
+          lineY,
+          "rgba(255, 64, 96, 0.95)",
+          -Math.abs(ox),
+          { misalignedOnly: true, band: gband }
+        );
+        ctx.globalAlpha = 0.45;
+        drawTitlePixels(
+          ctx,
+          cx,
+          ty,
+          layout,
+          lineY,
+          "rgba(120, 255, 190, 0.95)",
+          0,
+          { misalignedOnly: true, band: gband }
+        );
+        ctx.globalAlpha = 0.5;
+        drawTitlePixels(
+          ctx,
+          cx,
+          ty,
+          layout,
+          lineY,
+          "rgba(96, 160, 255, 0.95)",
+          Math.abs(ox),
+          { misalignedOnly: true, band: gband }
+        );
+        ctx.restore();
+      }
+
+      if (glitch && now >= glitchEnd) {
+        if (layout && layout.misalignedRects && layout.misalignedRects.length > 0) {
+          var ak;
+          for (ak = 0; ak < layout.misalignedRects.length; ak++) {
+            var mr = layout.misalignedRects[ak];
+            mr.mx = 0;
+            mr.my = 0;
+            mr.misaligned = false;
+            if (mr.el) {
+              mr.el.style.setProperty("--mx", "0px");
+              mr.el.style.setProperty("--my", "0px");
+              mr.el.classList.remove("mis");
+            }
+          }
+          layout.misalignedRects = [];
+        }
+        glitchDone = true;
+        glitch = null;
+      }
+
+      ctx.restore();
+
+      var solidBelowScan = !loadBar.done;
+      if (solidBelowScan) {
+        ctx.fillStyle = "#000000";
+        ctx.fillRect(0, darkStart, w, h - darkStart);
+      } else {
+        ctx.clearRect(0, darkStart, w, h + LINE_EXIT_PAD + 8 - darkStart);
+      }
+
+      if (lineY <= h + lineThickness) {
+        ctx.save();
+        ctx.shadowColor = "rgba(0, 230, 118, 0.55)";
+        ctx.shadowBlur = 14;
+        ctx.fillStyle = "#00e676";
+        ctx.fillRect(0, lineY, w, lineThickness);
+        ctx.restore();
+      }
+
+      if (!titleLoaded && lineY >= titleBox.verY + titleBox.verH + 4) {
+        titleLoaded = true;
+        scheduleGlitch();
+      }
+
+      if (
+        bootScene &&
+        loadBar.done &&
+        lineY >= h + LINE_EXIT_PAD &&
+        drawClipH <= 0.5 &&
+        !targetRevealed
+      ) {
+        targetRevealed = true;
+        BootAudio.silenceNow();
+        canvas.classList.remove("active");
+        canvas.style.display = "none";
+        if (heroClip) {
+          heroClip.style.display = "none";
+        }
+        stage.style.clipPath = "";
+        stage.style.display = "none";
+        scanlineComplete = true;
+
+        var finalUrl = (CONFIG.TARGET_URL || "").trim();
+        if (finalUrl) {
+          revealTargetFrame(finalUrl);
+        } else {
+          showConfigWaitOverlay();
+          startConfigPoll();
+        }
+        return;
+      }
+
+      requestAnimationFrame(frame);
+    }
+
+    setupCanvas();
+
+    canvas.classList.add("active");
+    stage.classList.remove("blackout");
+    stage.classList.add("scanline-boot");
+    requestAnimationFrame(frame);
+  }
+
+  async function run() {
+    await fetchWatchinatorConfig();
+    if (targetFrame && (CONFIG.TARGET_URL || "").trim()) {
+      targetFrame.src = CONFIG.TARGET_URL.trim();
+    }
+
+    var cursor = document.createElement("span");
+    cursor.className = "cursor";
+    cursor.setAttribute("aria-hidden", "true");
+    var line0 = document.createElement("div");
+    line0.className = "line";
+    var cmdSpan = document.createElement("span");
+    cmdSpan.textContent = PROMPT_PASTE;
+    line0.appendChild(cmdSpan);
+    line0.appendChild(cursor);
+    scroll.appendChild(line0);
+    scroll.scrollTop = scroll.scrollHeight;
+    await BootAudio.playBootBeeps();
+    await sleep(1000);
+
+    function sleepSudoJank() {
+      var r = Math.random();
+      if (r < 0.1) {
+        return rand(2, 14);
+      }
+      if (r < 0.2) {
+        return rand(160, 420);
+      }
+      if (r < 0.28) {
+        return rand(0, 22);
+      }
+      if (r < 0.36) {
+        return rand(90, 180);
+      }
+      return rand(22, 140);
+    }
+
+    var i = 0;
+    while (i < SUDO_CMD.length) {
+      if (Math.random() < 0.09 && i + 1 < SUDO_CMD.length) {
+        cmdSpan.textContent += SUDO_CMD.charAt(i) + SUDO_CMD.charAt(i + 1);
+        i += 2;
+      } else {
+        cmdSpan.textContent += SUDO_CMD.charAt(i);
+        i += 1;
+      }
+      scroll.scrollTop = scroll.scrollHeight;
+      if (Math.random() < 0.07) {
+        await sleep(sleepSudoJank());
+        await sleep(sleepSudoJank());
+      } else {
+        await sleep(sleepSudoJank());
+      }
+    }
+    cursor.classList.add("off");
+    await sleep(rand(120, 220));
+
+    appendRaw("");
+    var passLine = document.createElement("div");
+    passLine.className = "line";
+    passLine.textContent = PASS_LABEL;
+    scroll.appendChild(passLine);
+    scroll.scrollTop = scroll.scrollHeight;
+    await sleep(rand(280, 420));
+
+    var stars = document.createElement("span");
+    stars.textContent = "*****";
+    passLine.appendChild(stars);
+    scroll.scrollTop = scroll.scrollHeight;
+    await sleep(rand(90, 160));
+
+    var prefixes = [
+      "[ ok ]", "[ ok ]", "[ ok ]", "[ OK ]", "[ ok ]",
+      "[ ok ]", "[ OK ]", "[ ok ]",
+      " * ",
+      " >",
+    ];
+    var verbs = [
+      "mounting", "starting", "loading", "linking", "hashing",
+      "binding", "probing", "syncing", "flushing", "mapping",
+      "initializing", "validating", "staging", "unpacking",
+    ];
+    var nouns = [
+      "kiosk", "framebuffer", "udev", "dbus", "network", "wlan0",
+      "chromium", "xorg", "drm", "hdmi", "alsa", "pulse", "cgroup",
+      "tmpfs", "overlay", "squashfs", "module", "firmware", "clock",
+      "entropy", "rng", "iptables", "bridge", "dns", "dhcp", "ntp",
+    ];
+    var totalLines = 200;
+    var batch = 0;
+    while (batch < totalLines) {
+      var n = Math.min(3 + (Math.random() * 8) | 0, totalLines - batch);
+      var chunk = "";
+      var j;
+      for (j = 0; j < n; j++) {
+        var p = prefixes[(Math.random() * prefixes.length) | 0];
+        var line;
+        if (p.indexOf("ok") >= 0 || p.indexOf("OK") >= 0) {
+          line =
+            p +
+            " " +
+            verbs[(Math.random() * verbs.length) | 0] +
+            " " +
+            nouns[(Math.random() * nouns.length) | 0] +
+            "..." +
+            (Math.random() > 0.65 ? " done" : "");
+        } else {
+          line =
+            p +
+            " " +
+            (Math.random() * 0xfffff | 0).toString(16) +
+            "  " +
+            nouns[(Math.random() * nouns.length) | 0];
+        }
+        chunk += line + "\n";
+      }
+      appendRaw(chunk.trimEnd());
+      batch += n;
+      scroll.scrollTop = scroll.scrollHeight;
+      await sleep(rand(4, 18));
+    }
+
+    appendRaw("");
+    appendRaw(SUCCESS);
+    scroll.scrollTop = scroll.scrollHeight;
+
+    await sleep(1800);
+
+    stage.classList.add("blackout");
+    await sleep(400);
+    runScanline();
+  }
+
+  run().catch(function (e) { console.error(e); });
+})();
+  </script>
+</body>
+</html>

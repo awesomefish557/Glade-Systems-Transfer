@@ -6,6 +6,7 @@ const GOLD = "#d4a853";
 const MUTED = "#9a9588";
 const CARD = "#1a1916";
 const BORDER = "#2e2c27";
+const AMBER = "#c9a227";
 
 export type QueueBookie = {
   id: number;
@@ -15,6 +16,8 @@ export type QueueBookie = {
   joined_at?: string;
   last_activity?: string;
   onboarding_stage?: number;
+  queue_stage?: number;
+  stage_updated_at?: string;
 };
 
 export type TierMeta = {
@@ -52,19 +55,37 @@ const ONGOING_TIPS = [
   "Never use round stakes — always add odd pence",
 ];
 
-function normalizeStage(b: QueueBookie): number {
+/** Kanban column = persisted queue_stage (falls back to onboarding_stage for older rows). */
+function queueStage(b: QueueBookie): number {
+  const q = Number(b.queue_stage);
+  if (Number.isFinite(q) && q >= 1 && q <= 5) return Math.floor(q);
   const s = Number(b.onboarding_stage);
   if (Number.isFinite(s) && s >= 1 && s <= 5) return Math.floor(s);
   return 1;
 }
 
-function daysSinceLastAction(iso: string | undefined): number | null {
+function ymdLocal(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** First YYYY-MM-DD from ISO / SQLite timestamp. */
+function stageDayOnly(iso: string | undefined): string | null {
   if (!iso) return null;
-  const t = new Date(iso.includes("T") ? iso : iso.replace(" ", "T"));
-  if (Number.isNaN(t.getTime())) return null;
-  const now = new Date();
-  const diff = now.getTime() - t.getTime();
-  return Math.max(0, Math.floor(diff / (24 * 60 * 60 * 1000)));
+  const m = iso.match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : null;
+}
+
+/** Whole calendar days from stage_updated_at (date part) to today (local). */
+function daysSinceStageUpdate(stageUpdatedAt: string | undefined): number {
+  const start = stageDayOnly(stageUpdatedAt);
+  if (!start) return 0;
+  const t0 = new Date(`${start}T12:00:00`).getTime();
+  const t1 = new Date(`${ymdLocal(new Date())}T12:00:00`).getTime();
+  const diff = Math.floor((t1 - t0) / (24 * 60 * 60 * 1000));
+  return Math.max(0, diff);
 }
 
 function parseMaybeDate(iso: string | undefined): Date | null {
@@ -91,10 +112,54 @@ function isInCurrentCalendarWeek(iso: string | undefined): boolean {
   return t >= start && t < end;
 }
 
-function stage2ActionLabel(daysInStage: number | null): { label: "Tomorrow" | "Today" | "Overdue"; color: string } {
-  if (daysInStage !== null && daysInStage >= 2) return { label: "Overdue", color: "#c9a227" };
-  if (daysInStage !== null && daysInStage >= 1) return { label: "Today", color: GOLD };
-  return { label: "Tomorrow", color: GOLD };
+type AccountActionLine = { text: string; overdue?: boolean };
+
+function accountActionLines(b: QueueBookie): AccountActionLine[] {
+  const stage = queueStage(b);
+  const d = daysSinceStageUpdate(b.stage_updated_at);
+  const name = b.name;
+
+  if (stage === 2) {
+    if (d >= 2) {
+      return [{ text: "Overdue: you should have deposited by now — do it today", overdue: true }];
+    }
+    if (d >= 1) {
+      return [
+        {
+          text: `Today: Open ${name} → browse 2 mins → deposit £10-25 → close it. Don't touch welcome offer.`,
+        },
+      ];
+    }
+    return [{ text: "Tomorrow: deposit £10-25 after browsing 2 mins" }];
+  }
+  if (stage === 3) {
+    if (d >= 2) {
+      return [{ text: "Overdue: you should have placed the qualifying bet by now — do it today", overdue: true }];
+    }
+    if (d >= 1) {
+      return [
+        {
+          text: `Today: Open OddsMonkey → filter for ${name} → find odds within 0.15 → lay Smarkets FIRST → back at bookie → log in Bookies`,
+        },
+      ];
+    }
+    return [{ text: "Tomorrow: place qualifying bet" }];
+  }
+  if (stage === 4) {
+    if (d >= 2) {
+      return [{ text: "Overdue: you should have extracted the free bet by now — do it today", overdue: true }];
+    }
+    if (d >= 1) {
+      return [
+        {
+          text:
+            "Today: Check free bet landed → find odds 4.0-6.0 → SNR calculator → lay Smarkets FIRST → back with free bet → log profit",
+        },
+      ];
+    }
+    return [{ text: "Tomorrow: check free bet has landed, then extract it" }];
+  }
+  return [];
 }
 
 function tierSortKey(getTierMeta: (name: string) => TierMeta | null, name: string): number {
@@ -105,7 +170,7 @@ function tierSortKey(getTierMeta: (name: string) => TierMeta | null, name: strin
   return 3;
 }
 
-/** Lower = more urgent for “today’s action”. */
+/** Lower = more urgent for “today’s action” among stages 2–4. */
 const STAGE_URGENCY: Record<number, number> = {
   2: 0,
   3: 1,
@@ -114,15 +179,27 @@ const STAGE_URGENCY: Record<number, number> = {
   5: 4,
 };
 
-function pickFocusBookie(
-  rows: QueueBookie[],
-  getTierMeta: (name: string) => TierMeta | null,
-): QueueBookie | null {
+/**
+ * Sort bucket for focus card: 0 = overdue (≥2d), 1 = today (1d), 2 = tomorrow (0d), 9 = other (e.g. stage 1).
+ */
+function urgencyBucket(b: QueueBookie): number {
+  const stage = queueStage(b);
+  if (stage < 2 || stage > 4) return 9;
+  const d = daysSinceStageUpdate(b.stage_updated_at);
+  if (d >= 2) return 0;
+  if (d >= 1) return 1;
+  return 2;
+}
+
+function pickFocusBookie(rows: QueueBookie[], getTierMeta: (name: string) => TierMeta | null): QueueBookie | null {
   const pipe = rows.filter((b) => b.status !== "closed" && Number(b.welcome_claimed) !== 1);
   if (!pipe.length) return null;
   return [...pipe].sort((a, b) => {
-    const sa = normalizeStage(a);
-    const sb = normalizeStage(b);
+    const ba = urgencyBucket(a);
+    const bb = urgencyBucket(b);
+    if (ba !== bb) return ba - bb;
+    const sa = queueStage(a);
+    const sb = queueStage(b);
     const ua = STAGE_URGENCY[sa] ?? 9;
     const ub = STAGE_URGENCY[sb] ?? 9;
     if (ua !== ub) return ua - ub;
@@ -131,6 +208,27 @@ function pickFocusBookie(
     if (ta !== tb) return ta - tb;
     return a.name.localeCompare(b.name);
   })[0];
+}
+
+function cardStageHint(b: QueueBookie): string {
+  const stage = queueStage(b);
+  const d = daysSinceStageUpdate(b.stage_updated_at);
+  if (stage === 2) {
+    if (d >= 2) return "Overdue: deposit today";
+    if (d >= 1) return "Today: deposit (browse first)";
+    return "Tomorrow: deposit after browsing";
+  }
+  if (stage === 3) {
+    if (d >= 2) return "Overdue: qualifying bet";
+    if (d >= 1) return "Today: qualifying bet (OM + Smarkets first)";
+    return "Tomorrow: qualifying bet";
+  }
+  if (stage === 4) {
+    if (d >= 2) return "Overdue: extract free bet";
+    if (d >= 1) return "Today: free bet / SNR";
+    return "Tomorrow: check free bet landed";
+  }
+  return STAGE_HINTS[stage];
 }
 
 const CHECKLIST_DAY1 = [
@@ -177,17 +275,19 @@ const CHECKLIST_DAY4 = [
 type QueueTabProps = {
   bookies: QueueBookie[];
   getTierMeta: (name: string) => TierMeta | null;
+  onPatchStage: (id: number, stage: number) => Promise<void>;
   onPatchBookie: (id: number, patch: Record<string, unknown>) => Promise<void>;
   onRefresh: () => Promise<void>;
 };
 
-export function QueueTab({ bookies, getTierMeta, onPatchBookie, onRefresh }: QueueTabProps) {
+export function QueueTab({ bookies, getTierMeta, onPatchStage, onPatchBookie, onRefresh }: QueueTabProps) {
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [profitModal, setProfitModal] = useState<{ id: number; name: string } | null>(null);
   const [profitInput, setProfitInput] = useState("");
   const [profitSaving, setProfitSaving] = useState(false);
   const [guideBookie, setGuideBookie] = useState<QueueBookie | null>(null);
   const [patchErr, setPatchErr] = useState<string | null>(null);
+  const [showAllUpcoming, setShowAllUpcoming] = useState(false);
 
   const pipeline = useMemo(
     () => bookies.filter((b) => b.status !== "closed" && Number(b.welcome_claimed) !== 1),
@@ -195,10 +295,24 @@ export function QueueTab({ bookies, getTierMeta, onPatchBookie, onRefresh }: Que
   );
 
   const focus = useMemo(() => pickFocusBookie(bookies, getTierMeta), [bookies, getTierMeta]);
+
+  const upcomingSorted = useMemo(() => {
+    const rows = pipeline.filter((b) => {
+      const s = queueStage(b);
+      return s >= 2 && s <= 4;
+    });
+    return [...rows].sort((a, b) => {
+      const da = a.stage_updated_at ?? "";
+      const db = b.stage_updated_at ?? "";
+      if (da !== db) return da.localeCompare(db);
+      return a.name.localeCompare(b.name);
+    });
+  }, [pipeline]);
+
   const recommendedNewAccount = useMemo(() => {
     const activePipeline = bookies.filter((b) => {
       if (b.status === "closed" || Number(b.welcome_claimed) === 1) return false;
-      const s = normalizeStage(b);
+      const s = queueStage(b);
       return s >= 2 && s <= 4;
     });
     const currentlySettingUpCount = activePipeline.length;
@@ -219,7 +333,7 @@ export function QueueTab({ bookies, getTierMeta, onPatchBookie, onRefresh }: Que
     );
     const nextUnstarted = tier2Order
       .map((name) => byName.get(name.toLowerCase()))
-      .find((b) => b && b.status !== "closed" && Number(b.welcome_claimed) !== 1 && normalizeStage(b) === 1);
+      .find((b) => b && b.status !== "closed" && Number(b.welcome_claimed) !== 1 && queueStage(b) === 1);
 
     const shouldRecommend = currentlySettingUpCount < 2 && staleEnough && openedThisWeekCount < 2 && !!nextUnstarted;
     return shouldRecommend ? nextUnstarted : null;
@@ -236,13 +350,13 @@ export function QueueTab({ bookies, getTierMeta, onPatchBookie, onRefresh }: Que
         return;
       }
       try {
-        await onPatchBookie(bookieId, { onboarding_stage: stage });
+        await onPatchStage(bookieId, stage);
         await onRefresh();
       } catch (e) {
         setPatchErr(e instanceof Error ? e.message : String(e));
       }
     },
-    [bookies, onPatchBookie, onRefresh],
+    [bookies, onPatchStage, onRefresh],
   );
 
   const confirmProfit = useCallback(async () => {
@@ -259,6 +373,7 @@ export function QueueTab({ bookies, getTierMeta, onPatchBookie, onRefresh }: Que
         welcome_claimed: 1,
         welcome_profit: n,
         onboarding_stage: 5,
+        queue_stage: 5,
       });
       setProfitModal(null);
       await onRefresh();
@@ -267,12 +382,12 @@ export function QueueTab({ bookies, getTierMeta, onPatchBookie, onRefresh }: Que
     } finally {
       setProfitSaving(false);
     }
-  }, [profitModal, profitInput, onPatchBookie, onRefresh]);
+  }, [profitModal, profitInput, onPatchStage, onPatchBookie, onRefresh]);
 
   const n = (name: string) => name.trim().toLowerCase();
   const isCoral = focus && n(focus.name) === "coral";
-  const focusDaysInStage = daysSinceLastAction(focus?.last_activity);
-  const focusStage2Label = stage2ActionLabel(focusDaysInStage);
+  const focusStage = focus ? queueStage(focus) : 1;
+  const focusActionLines = focus ? accountActionLines(focus) : [];
 
   return (
     <div style={{ display: "grid", gap: "1.5rem", paddingBottom: "2rem" }}>
@@ -351,23 +466,38 @@ export function QueueTab({ bookies, getTierMeta, onPatchBookie, onRefresh }: Que
               }}
             >
               <div style={{ color: MUTED, fontSize: "0.78rem", marginBottom: "0.35rem", letterSpacing: "0.06em" }}>
-                Most urgent · <span style={{ color: GOLD }}>{focus.name}</span> · stage {normalizeStage(focus)}
+                Most urgent · <span style={{ color: GOLD }}>{focus.name}</span> · stage {focusStage}
+                {focus.stage_updated_at && (
+                  <span style={{ marginLeft: "0.5rem", opacity: 0.85 }}>
+                    · stage since {stageDayOnly(focus.stage_updated_at) ?? focus.stage_updated_at.slice(0, 10)}
+                  </span>
+                )}
               </div>
-              {normalizeStage(focus) === 2 ? (
+              {focusStage >= 2 && focusStage <= 4 ? (
                 <div style={{ display: "grid", gap: "0.85rem", color: TEXT, lineHeight: 1.55, fontSize: "0.92rem" }}>
-                  <p style={{ margin: 0 }}>
-                    <strong style={{ color: focusStage2Label.color }}>{focusStage2Label.label}:</strong>{" "}
-                    Open {focus.name} → browse 2 mins → deposit £10-25 → close it.
-                  </p>
-                  <p style={{ margin: 0 }}>
-                    <strong style={{ color: GOLD }}>{focus.name} welcome offer:</strong> Bet £5 get £20. Expected qualifying loss: ~£0.50-1.00.
-                    Expected free bet profit: £13-16.
-                  </p>
+                  {focusActionLines.map((line, i) => (
+                    <p
+                      key={i}
+                      style={{
+                        margin: 0,
+                        color: line.overdue ? AMBER : TEXT,
+                        fontWeight: line.overdue ? 600 : 400,
+                      }}
+                    >
+                      {line.text}
+                    </p>
+                  ))}
+                  {focusStage === 2 && !focusActionLines.some((l) => l.overdue) && (
+                    <p style={{ margin: 0 }}>
+                      <strong style={{ color: GOLD }}>{focus.name} welcome offer:</strong> Bet £5 get £20. Expected qualifying loss: ~£0.50-1.00.
+                      Expected free bet profit: £13-16.
+                    </p>
+                  )}
                 </div>
               ) : (
                 <div style={{ color: TEXT, lineHeight: 1.55, fontSize: "0.92rem" }}>
                   <p style={{ margin: "0 0 0.75rem" }}>
-                    <strong style={{ color: GOLD }}>{focus.name}</strong> — {STAGE_HINTS[normalizeStage(focus)]}
+                    <strong style={{ color: GOLD }}>{focus.name}</strong> — {STAGE_HINTS[focusStage]}
                   </p>
                   <p style={{ margin: 0, color: MUTED, fontSize: "0.88rem" }}>
                     Follow the account opening guide (click the bookie card in the kanban) for full day-by-day steps.
@@ -375,7 +505,7 @@ export function QueueTab({ bookies, getTierMeta, onPatchBookie, onRefresh }: Que
                 </div>
               )}
             </div>
-            {normalizeStage(focus) === 2 && (
+            {focusStage === 2 && (
               <div
                 style={{
                   marginTop: "0.85rem",
@@ -391,6 +521,55 @@ export function QueueTab({ bookies, getTierMeta, onPatchBookie, onRefresh }: Que
               >
                 <strong style={{ color: GOLD }}>Reminder:</strong> Download the {isCoral ? "Coral" : focus.name} app on your phone today — open it
                 once, browse briefly, close it. Signals normal behaviour from day 1.
+              </div>
+            )}
+
+            {upcomingSorted.length >= 1 && (
+              <div style={{ marginTop: "1rem" }}>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => setShowAllUpcoming((v) => !v)}
+                  style={{ fontSize: "0.85rem" }}
+                >
+                  {showAllUpcoming ? "Hide all upcoming" : "View all upcoming"}
+                </button>
+                {showAllUpcoming && (
+                  <div
+                    style={{
+                      marginTop: "0.65rem",
+                      padding: "0.85rem 1rem",
+                      background: BG,
+                      border: `1px solid ${BORDER}`,
+                      borderRadius: 10,
+                      display: "grid",
+                      gap: "0.75rem",
+                    }}
+                  >
+                    <div style={{ color: MUTED, fontSize: "0.78rem", letterSpacing: "0.06em" }}>
+                      All bookies in stages 2–4 (oldest stage date first)
+                    </div>
+                    <ul style={{ margin: 0, paddingLeft: "1.1rem", color: TEXT, fontSize: "0.88rem", lineHeight: 1.5 }}>
+                      {upcomingSorted.map((b) => {
+                        const lines = accountActionLines(b);
+                        const day = stageDayOnly(b.stage_updated_at) ?? "—";
+                        return (
+                          <li key={b.id} style={{ marginBottom: "0.5rem" }}>
+                            <strong style={{ color: GOLD }}>{b.name}</strong>
+                            <span style={{ color: MUTED }}> · stage {queueStage(b)} · since {day}</span>
+                            <div style={{ marginTop: "0.25rem", color: MUTED }}>
+                              {lines.map((l, i) => (
+                                <div key={i} style={{ color: l.overdue ? AMBER : MUTED }}>
+                                  {l.text}
+                                </div>
+                              ))}
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                )}
               </div>
             )}
           </>
@@ -474,12 +653,13 @@ export function QueueTab({ bookies, getTierMeta, onPatchBookie, onRefresh }: Que
               </h3>
               <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem" }}>
                 {pipeline
-                  .filter((b) => normalizeStage(b) === col.stage)
+                  .filter((b) => queueStage(b) === col.stage)
                   .map((b) => {
                     const tier = getTierMeta(b.name);
-                    const days = daysSinceLastAction(b.last_activity);
-                    const stage = normalizeStage(b);
-                    const stageHint = stage === 2 ? `${stage2ActionLabel(days).label}: ${STAGE_HINTS[2]}` : STAGE_HINTS[stage];
+                    const stage = queueStage(b);
+                    const d = daysSinceStageUpdate(b.stage_updated_at);
+                    const stageHint = cardStageHint(b);
+                    const dayLabel = stageDayOnly(b.stage_updated_at);
                     return (
                       <div
                         key={b.id}
@@ -536,9 +716,21 @@ export function QueueTab({ bookies, getTierMeta, onPatchBookie, onRefresh }: Que
                           <div style={{ color: MUTED, fontSize: "0.68rem", marginBottom: "0.35rem" }}>Tier —</div>
                         )}
                         <div style={{ color: MUTED, fontSize: "0.68rem", marginBottom: "0.35rem" }}>
-                          {days === null ? "No last action" : days === 0 ? "Today" : `${days}d since last action`}
+                          {stage >= 2 && stage <= 4
+                            ? dayLabel
+                              ? `${d}d in stage · since ${dayLabel}`
+                              : "Stage date — set by moving card"
+                            : "Not in timed stage"}
                         </div>
-                        <div style={{ color: MUTED, fontSize: "0.7rem", lineHeight: 1.35 }}>{stageHint}</div>
+                        <div
+                          style={{
+                            color: stage >= 2 && stage <= 4 && d >= 2 ? AMBER : MUTED,
+                            fontSize: "0.7rem",
+                            lineHeight: 1.35,
+                          }}
+                        >
+                          {stageHint}
+                        </div>
                         <div style={{ marginTop: "0.4rem", fontSize: "0.65rem", color: GOLD, opacity: 0.85 }}>
                           Drag to next column once you've completed this stage
                         </div>

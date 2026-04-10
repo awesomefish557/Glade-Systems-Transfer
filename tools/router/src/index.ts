@@ -338,6 +338,21 @@ async function proxyPinboard(request: Request, url: URL, env: Env): Promise<Resp
   return fallback.ok ? fallback : res;
 }
 
+function bookiesUpstreamBase(env: Env): string {
+  const b =
+    typeof env.BOOKIES_ORIGIN === 'string' && env.BOOKIES_ORIGIN.trim() !== ''
+      ? env.BOOKIES_ORIGIN.trim().replace(/\/$/, '')
+      : 'https://bookies-ui.pages.dev';
+  return b;
+}
+
+/** Keep Bookies on its native Pages host to avoid SPA base-path issues under /bookies. */
+function redirectBookies(url: URL, env: Env): Response {
+  const base = bookiesUpstreamBase(env);
+  const suffix = stripPrefix(url.pathname, '/bookies');
+  return Response.redirect(`${base}${suffix}${url.search}`, 302);
+}
+
 /** API Worker for Pinboard; strip /pinboard-api before forwarding. */
 async function proxyPinboardApi(request: Request, url: URL): Promise<Response> {
   const base = 'https://pinboard-api.gladesystems.workers.dev';
@@ -371,6 +386,8 @@ export interface Env {
   SEER_PAGES_ORIGIN?: string;
   /** Pinboard UI Pages origin (no trailing slash), e.g. https://convertor-release.pinboard-ui.pages.dev */
   PINBOARD_ORIGIN?: string;
+  /** Bookies UI Pages origin (no trailing slash), e.g. https://bookies-ui.pages.dev */
+  BOOKIES_ORIGIN?: string;
   /** Watch-inator kiosk config (D1 watchinator-db) */
   WATCHINATOR_DB?: D1Database;
 }
@@ -415,6 +432,10 @@ export default {
 
     if (path.startsWith('/pinboard')) {
       return proxyPinboard(request, url, env);
+    }
+
+    if (path.startsWith('/bookies')) {
+      return redirectBookies(url, env);
     }
 
     if (path.startsWith('/seer')) {
@@ -784,7 +805,7 @@ function landingPage(): string {
   </div>
 
   <!-- BOOKIES — open ledger / twin pages -->
-  <div class="constellation" title="Bookies — matched betting tracker" style="left:50%;top:34%;transform:translateX(-50%)" onclick="location.href='https://convertor-release.bookies-ui.pages.dev'">
+  <div class="constellation" title="Bookies — matched betting tracker" style="left:50%;top:34%;transform:translateX(-50%)" onclick="location.href='/bookies'">
     <svg width="80" height="76" viewBox="0 0 80 76" fill="none">
       <g class="c-lines" stroke="rgba(140,200,160,0.4)" stroke-width="0.7" opacity="0.55">
         <line x1="40" y1="12" x2="40" y2="58"/>

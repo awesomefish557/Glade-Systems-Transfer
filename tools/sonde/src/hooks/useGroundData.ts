@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { GroundData, SiteLocation } from '../types'
+import { aggregateEgmsFromFeatures, fetchEgmsPointsFeatureCollection } from '../utils/egms'
 import { proxied } from '../utils/proxy'
 
 type GroundFetchState =
@@ -233,13 +234,39 @@ async function fetchBgsGround(lat: number, lng: number): Promise<{
   }
 }
 
-type EgmsResponse = {
-  points?: Array<Record<string, unknown>>
-  data?: Array<Record<string, unknown>>
-  features?: Array<{
-    geometry?: { coordinates?: [number, number] }
-    properties?: Record<string, unknown>
-  }>
+function classifyEgmsMovement(mean?: number): {
+  movementClassification: GroundData['movementClassification']
+  movementRag: GroundData['movementRag']
+} {
+  if (mean == null || !Number.isFinite(mean)) {
+    return { movementClassification: 'Stable', movementRag: 'green' }
+  }
+  if (mean > 0.5) return { movementClassification: 'Uplift', movementRag: 'blue' }
+  if (mean >= -0.5) return { movementClassification: 'Stable', movementRag: 'green' }
+  if (mean >= -2) return { movementClassification: 'Slow movement', movementRag: 'amber' }
+  return { movementClassification: 'Active movement', movementRag: 'red' }
+}
+
+function syntheticCumulativeSeries(
+  meanMmYr: number | undefined,
+  firstDate?: string,
+  lastDate?: string
+): GroundData['movementCumulativeSeries'] {
+  if (meanMmYr == null || !Number.isFinite(meanMmYr) || !firstDate || !lastDate) return undefined
+  const t0 = new Date(firstDate).getTime()
+  const t1 = new Date(lastDate).getTime()
+  if (!Number.isFinite(t0) || !Number.isFinite(t1) || t1 <= t0) return undefined
+  const out: NonNullable<GroundData['movementCumulativeSeries']> = []
+  const steps = 24
+  for (let i = 0; i <= steps; i += 1) {
+    const t = t0 + (i / steps) * (t1 - t0)
+    const years = (t - t0) / (365.25 * 86_400_000)
+    out.push({
+      date: new Date(t).toISOString().slice(0, 10),
+      cumulativeMm: meanMmYr * years,
+    })
+  }
+  return out
 }
 
 async function fetchEgmsGround(lat: number, lng: number): Promise<{
@@ -247,37 +274,24 @@ async function fetchEgmsGround(lat: number, lng: number): Promise<{
   seasonalAmplitudeMm?: number
   movementPoints: number
   movementSeries: GroundData['movementSeries']
+  movementCumulativeSeries: GroundData['movementCumulativeSeries']
+  firstDate?: string
+  lastDate?: string
 }> {
-  const u = new URL('https://egms.land.copernicus.eu/egms-api/v1/points')
-  u.searchParams.set('lat', String(lat))
-  u.searchParams.set('lng', String(lng))
-  u.searchParams.set('radius', '500')
-  u.searchParams.set('dataset', 'EGMS_L3_E')
-  const res = await safeFetch(proxied(u.toString()))
-  if (!res?.ok) return { movementPoints: 0, movementSeries: [] }
-  const json = (await res.json()) as EgmsResponse
-  const points = json.points ?? json.data ?? []
-  const fromFeatures = (json.features ?? []).map((f) => f.properties ?? {})
-  const rows = points.length ? points : fromFeatures
-  if (!rows.length) return { movementPoints: 0, movementSeries: [] }
-
-  const meanValues = rows
-    .map((row) => numFromRecord(row, ['mean_velocity', 'velocity_mm_yr', 'velocity', 'mean', 'v_mean']))
-    .filter((v): v is number => v != null)
-  const ampValues = rows
-    .map((row) => numFromRecord(row, ['seasonal_amplitude', 'amplitude', 'amp_mm', 'seasonal']))
-    .filter((v): v is number => v != null)
-
-  const avg = (arr: number[]) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : undefined)
-  const movementMeanMmYr = avg(meanValues)
-  const seasonalAmplitudeMm = avg(ampValues)
+  const fc = await fetchEgmsPointsFeatureCollection(lat, lng, 500)
+  const agg = aggregateEgmsFromFeatures(fc)
+  const meanValues = fc.features
+    .map((f) => (f.properties as Record<string, unknown> | undefined)?.mean_velocity)
+    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
   const movementSeries = meanValues.slice(0, 12).map((v, i) => ({ label: `P${i + 1}`, displacementMm: v }))
-
   return {
-    movementMeanMmYr,
-    seasonalAmplitudeMm,
-    movementPoints: rows.length,
+    movementMeanMmYr: agg.movementMeanMmYr,
+    seasonalAmplitudeMm: agg.seasonalAmplitudeMm,
+    movementPoints: agg.movementPoints,
     movementSeries,
+    movementCumulativeSeries: syntheticCumulativeSeries(agg.movementMeanMmYr, agg.firstDate, agg.lastDate),
+    firstDate: agg.firstDate,
+    lastDate: agg.lastDate,
   }
 }
 
@@ -345,6 +359,8 @@ export function useGroundData(site: SiteLocation | null, refreshKey: number): Gr
           : undefined
       const bearing = parseBearing(geology.bearing)
       const madeGroundDetected = /made ground|fill/i.test(geology.superficial)
+      const meanVel = egmsGround.movementMeanMmYr ?? (prefix === 'CF' ? -1.2 : undefined)
+      const { movementClassification, movementRag } = classifyEgmsMovement(meanVel)
       const data: GroundData = {
         dtmAodM: dtmAtSite.elevationM,
         dsmAodM: dsmAtSite.elevationM,
@@ -356,26 +372,24 @@ export function useGroundData(site: SiteLocation | null, refreshKey: number): Gr
         bedrockType: bgsGround.bedrockType ?? geology.bedrock,
         bearing,
         boreholes: [],
-        movementMeanMmYr: egmsGround.movementMeanMmYr ?? (prefix === 'CF' ? -1.2 : undefined),
-        movementClassification:
-          egmsGround.movementMeanMmYr != null && Math.abs(egmsGround.movementMeanMmYr) > 2
-            ? 'Active movement'
-            : egmsGround.movementMeanMmYr != null && Math.abs(egmsGround.movementMeanMmYr) > 0.5
-              ? 'Slow movement'
-              : prefix === 'CF'
-                ? 'Slow movement'
-                : 'Stable',
-        movementRag:
-          egmsGround.movementMeanMmYr != null && Math.abs(egmsGround.movementMeanMmYr) > 2
-            ? 'red'
-            : 'amber',
+        movementMeanMmYr: meanVel,
+        movementClassification,
+        movementRag,
         seasonalAmplitudeMm: egmsGround.seasonalAmplitudeMm,
         movementPoints: egmsGround.movementPoints,
         movementDateRange:
           egmsGround.movementPoints > 0
-            ? 'EGMS_L3_E within 500m radius'
+            ? [
+                'EGMS_L3_E · Sentinel-1',
+                egmsGround.firstDate && egmsGround.lastDate
+                  ? `${egmsGround.firstDate} → ${egmsGround.lastDate}`
+                  : '',
+              ]
+                .filter(Boolean)
+                .join(' · ')
             : 'EGMS live viewer link provided (fallback mode)',
         movementSeries: egmsGround.movementSeries,
+        movementCumulativeSeries: egmsGround.movementCumulativeSeries,
         madeGroundDetected,
         designImplications,
       }

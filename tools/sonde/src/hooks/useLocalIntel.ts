@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { SiteLocation } from '../types'
+import { proxied } from '../utils/proxy'
 
 export type LocalIntelCategory = 'planning' | 'historical' | 'environmental' | 'community'
 
@@ -140,7 +141,7 @@ async function fetchCoflein(lat: number, lng: number): Promise<CofleinHit[]> {
     u.searchParams.set('lat', String(lat))
     u.searchParams.set('lng', String(lng))
     u.searchParams.set('radius', '500')
-    const res = await fetch(u.toString())
+    const res = await fetch(proxied(u.toString()))
     if (!res.ok) return []
     const j = (await res.json()) as {
       results?: Array<{ id?: string; title?: string; type?: string; url?: string }>

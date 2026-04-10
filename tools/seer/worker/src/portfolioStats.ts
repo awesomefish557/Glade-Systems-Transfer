@@ -130,6 +130,65 @@ export async function buildPortfolioStats(
       ? (totalProfitLoss / totalStakedClosed) * (365 / daysSinceFirstClosed)
       : null;
 
+  let weightedHoldDays = 0;
+  for (const p of closed) {
+    const created = parseSqliteOrIsoDate(p.created_at);
+    const resolved = parseSqliteOrIsoDate(p.resolved_at);
+    if (created == null || resolved == null) continue;
+    const dh = Math.max(1, (resolved - created) / 86_400_000);
+    weightedHoldDays += dh * p.stake;
+  }
+  const avgHoldDaysClosed =
+    totalStakedClosed > 0 ? weightedHoldDays / totalStakedClosed : 0;
+  const roiPortfolio =
+    totalStakedClosed > 0 ? totalProfitLoss / totalStakedClosed : 0;
+  const liveAerBlended =
+    totalStakedClosed > 0 &&
+    avgHoldDaysClosed > 0 &&
+    roiPortfolio > -0.999
+      ? Math.pow(1 + roiPortfolio, 365 / avgHoldDaysClosed) - 1
+      : null;
+
+  const sortedByResolved = [...closed]
+    .map((p) => ({
+      p,
+      rt: parseSqliteOrIsoDate(p.resolved_at)
+    }))
+    .filter((x) => x.rt != null)
+    .sort((a, b) => (a.rt ?? 0) - (b.rt ?? 0));
+  let liveAerTrend: "improving" | "stable" | "declining" | null = null;
+  if (sortedByResolved.length >= 4) {
+    const mid = Math.floor(sortedByResolved.length / 2);
+    const firstHalf = sortedByResolved.slice(0, mid);
+    const secondHalf = sortedByResolved.slice(mid);
+    const aerHalf = (rows: typeof firstHalf) => {
+      let s = 0;
+      let w = 0;
+      for (const { p } of rows) {
+        const c = parseSqliteOrIsoDate(p.created_at);
+        const r = parseSqliteOrIsoDate(p.resolved_at);
+        if (c == null || r == null) continue;
+        const days = Math.max(1, (r - c) / 86_400_000);
+        const rRet = p.profit_loss / p.stake;
+        if (rRet <= -1) continue;
+        const ann = Math.pow(1 + rRet, 365 / days) - 1;
+        if (Number.isFinite(ann)) {
+          s += ann * p.stake;
+          w += p.stake;
+        }
+      }
+      return w > 0 ? s / w : null;
+    };
+    const a1 = aerHalf(firstHalf);
+    const a2 = aerHalf(secondHalf);
+    if (a1 != null && a2 != null && Number.isFinite(a1) && Number.isFinite(a2)) {
+      const diff = a2 - a1;
+      if (diff > 0.02) liveAerTrend = "improving";
+      else if (diff < -0.02) liveAerTrend = "declining";
+      else liveAerTrend = "stable";
+    }
+  }
+
   const winsClosed = closed.filter((p) => p.profit_loss > 0).length;
   const resolvedClosedCount = closed.length;
   const winRateClosed =
@@ -164,6 +223,11 @@ export async function buildPortfolioStats(
     threshold1000Warning,
     resolvedClosedCount,
     liveAerSimple,
+    liveAerBlended,
+    avgHoldDaysClosed:
+      avgHoldDaysClosed > 0 ? avgHoldDaysClosed : null,
+    liveAerTrend,
+    backtestStrategyBTarget: 0.474,
     ukTaxYear: {
       start: tyStart.toISOString(),
       end: tyEnd.toISOString()

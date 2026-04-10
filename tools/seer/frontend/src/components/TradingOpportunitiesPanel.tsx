@@ -14,7 +14,8 @@ import type {
   PaperPlatformChoice,
   TradingOpportunityRow
 } from "../types";
-import { formatGbp, formatPct, tagsFromSignals } from "../utils";
+import { AerHoldDisplay } from "./AerHoldDisplay";
+import { formatGbp, formatTieredSuggestedStakeLine, tagsFromSignals } from "../utils";
 
 const COMPARE_KEYS = [
   "polymarket",
@@ -43,7 +44,7 @@ function readBankroll(): number {
     const raw = localStorage.getItem("seer-settings-v1");
     if (!raw) return 200;
     const j = JSON.parse(raw) as { bankroll?: number };
-    return typeof j.bankroll === "number" && j.bankroll > 0 ? j.bankroll : 200;
+    return typeof j.bankroll === "number" && j.bankroll > 0 ? j.bankroll : 1000;
   } catch {
     return 200;
   }
@@ -282,6 +283,7 @@ export default function TradingOpportunitiesPanel({
                 <th>Price</th>
                 <th>Days</th>
                 <th>AER</th>
+                <th>Tier stake</th>
                 <th>Signals</th>
                 <th>Bet</th>
               </tr>
@@ -289,7 +291,7 @@ export default function TradingOpportunitiesPanel({
             <tbody>
               {sorted.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="empty">
+                  <td colSpan={9} className="empty">
                     No opportunities match this filter.
                   </td>
                 </tr>
@@ -308,7 +310,16 @@ export default function TradingOpportunitiesPanel({
                     <td className="num">{o.direction}</td>
                     <td className="num">{(o.currentPrice * 100).toFixed(1)}%</td>
                     <td className="num">{fmtDays(o.daysToResolution)}</td>
-                    <td className="num">{formatPct(o.aer, 1)}</td>
+                    <td className="num aer-cell">
+                      <AerHoldDisplay
+                        aer={o.aer}
+                        daysToResolution={o.daysToResolution}
+                        aerHoldWarning={o.aerHoldWarning}
+                      />
+                    </td>
+                    <td className="tier-stake-cell">
+                      {formatTieredSuggestedStakeLine(bankroll, o)}
+                    </td>
                     <td>
                       <div className="tag-row">
                         {tagsFromSignals(o.signals).map((t) => (

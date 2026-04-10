@@ -63,6 +63,28 @@ export default {
       if (req.method === 'DELETE') return handleDeleteBookie(id, env);
     }
 
+    if (path.match(/^\/bookies\/\d+\/stage$/) && req.method === 'PATCH') {
+      const id = parseInt(path.split('/')[2] ?? '', 10);
+      if (!Number.isFinite(id)) return err('Invalid id', 400);
+      let body: unknown;
+      try {
+        body = await req.json();
+      } catch {
+        return err('Invalid JSON', 400);
+      }
+      const stage = Number((body as { stage?: unknown }).stage);
+      if (!Number.isFinite(stage) || stage < 1 || stage > 5) return err('stage must be 1–5');
+      const n = Math.floor(stage);
+      await env.DB.prepare(
+        'UPDATE bookies SET queue_stage=?, stage_updated_at=CURRENT_TIMESTAMP, last_activity=CURRENT_TIMESTAMP WHERE id=?'
+      )
+        .bind(n, id)
+        .run();
+      const updated = await env.DB.prepare('SELECT * FROM bookies WHERE id=?').bind(id).first();
+      if (!updated) return err('Bookie not found', 404);
+      return json(updated);
+    }
+
     // ── Bets ─────────────────────────────────────────────────────────────
     if (path === '/bets') {
       if (req.method === 'GET') return handleGetBets(url, env);
@@ -192,8 +214,8 @@ async function handleCreateBookie(req: Request, env: Env) {
       ? Math.floor(body.onboarding_stage)
       : 1;
   const { meta } = await env.DB.prepare(
-    `INSERT INTO bookies (name, status, welcome_claimed, welcome_profit, current_balance, notes, onboarding_stage)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO bookies (name, status, welcome_claimed, welcome_profit, current_balance, notes, onboarding_stage, queue_stage)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       body.name,
@@ -202,6 +224,7 @@ async function handleCreateBookie(req: Request, env: Env) {
       body.welcome_profit ?? 0,
       body.current_balance ?? 0,
       body.notes ?? null,
+      stage,
       stage
     )
     .run();
@@ -218,6 +241,11 @@ async function handleUpdateBookie(id: number, req: Request, env: Env) {
     if (!Number.isFinite(n) || n < 1 || n > 5) return err('onboarding_stage must be 1–5');
     body.onboarding_stage = Math.floor(n);
   }
+  if ('queue_stage' in body) {
+    const n = Number(body.queue_stage);
+    if (!Number.isFinite(n) || n < 1 || n > 5) return err('queue_stage must be 1–5');
+    body.queue_stage = Math.floor(n);
+  }
   const fields: string[] = [];
   const values: unknown[] = [];
 
@@ -230,6 +258,7 @@ async function handleUpdateBookie(id: number, req: Request, env: Env) {
     'total_pl',
     'notes',
     'onboarding_stage',
+    'queue_stage',
   ];
   for (const key of allowed) {
     if (key in body) {
@@ -239,6 +268,9 @@ async function handleUpdateBookie(id: number, req: Request, env: Env) {
   }
   if (!fields.length) return err('Nothing to update');
 
+  if ('queue_stage' in body) {
+    fields.push('stage_updated_at = CURRENT_TIMESTAMP');
+  }
   fields.push('last_activity = CURRENT_TIMESTAMP');
   values.push(id);
 

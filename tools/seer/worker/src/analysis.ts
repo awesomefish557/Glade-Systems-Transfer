@@ -24,6 +24,89 @@ export interface PriceHistory {
   recorded_at: string;
 }
 
+/** UI / API: long-dated AER caveat (thresholds in `aerHoldWarningFromDays`). */
+export type AerHoldWarning = {
+  severity: "amber" | "red";
+  message: string;
+};
+
+export const AER_HOLD_CAVEAT_MESSAGE = "Long hold reduces edge";
+
+/** Politics / elections: long-dated → force L2 + `[POLITICS_LONG_DATED]` signal. */
+export const POLITICS_LONG_DATED_RE =
+  /politic|election|senate|governor|congress|democrat|republican/i;
+
+/** Tiered stake: 0 = L2/L3 (1% cap); 1–4 = L1 bands by horizon + price. */
+export type SuggestedStakeTier = 0 | 1 | 2 | 3 | 4;
+
+export type TieredStakeInputs = {
+  daysToResolution: number;
+  /** Implied prob for the chosen direction (YES or NO price). */
+  currentPrice: number;
+  layer: "1" | "2" | "3";
+};
+
+/**
+ * Tiered stake (fraction of bankroll) alongside Kelly. L2/L3 → 1%.
+ * L1: ≤14d & ≥97% → 10%; ≤60d & ≥95% → 5%; ≤180d & ≥90% → 2%; else 0.5%.
+ */
+export function getTieredSuggestedStake(
+  bankroll: number,
+  args: TieredStakeInputs
+): { stake: number; tier: SuggestedStakeTier } {
+  const { daysToResolution: days, currentPrice: price, layer } = args;
+  if (layer !== "1") {
+    return { stake: bankroll * 0.01, tier: 0 };
+  }
+  if (days <= 14 && price >= 0.97) {
+    return { stake: bankroll * 0.1, tier: 1 };
+  }
+  if (days <= 60 && price >= 0.95) {
+    return { stake: bankroll * 0.05, tier: 2 };
+  }
+  if (days <= 180 && price >= 0.9) {
+    return { stake: bankroll * 0.02, tier: 3 };
+  }
+  return { stake: bankroll * 0.005, tier: 4 };
+}
+
+function parseLayerInput(layer: string): "1" | "2" | "3" {
+  const t = String(layer).trim().replace(/^L/i, "");
+  if (t === "1") return "1";
+  if (t === "3") return "3";
+  return "2";
+}
+
+/**
+ * Tiered stake (absolute £) for bankroll × price × days × layer string ("1"|"2"|"3"|"L1"…).
+ * Overload: `getSuggestedStake(b, { currentPrice, daysToResolution, layer })` for typed inputs.
+ */
+export function getSuggestedStake(
+  bankroll: number,
+  price: number,
+  daysToResolution: number,
+  layer: string
+): number;
+export function getSuggestedStake(
+  bankroll: number,
+  args: TieredStakeInputs
+): number;
+export function getSuggestedStake(
+  bankroll: number,
+  priceOrArgs: number | TieredStakeInputs,
+  daysToResolution?: number,
+  layer?: string
+): number {
+  if (typeof priceOrArgs === "object" && priceOrArgs !== null) {
+    return getTieredSuggestedStake(bankroll, priceOrArgs).stake;
+  }
+  return getTieredSuggestedStake(bankroll, {
+    currentPrice: priceOrArgs as number,
+    daysToResolution: daysToResolution!,
+    layer: parseLayerInput(layer!)
+  }).stake;
+}
+
 export interface Opportunity {
   marketId: string;
   question: string;
@@ -37,9 +120,15 @@ export interface Opportunity {
   layer: "1" | "2" | "3";
   kellyFraction: number;
   suggestedStake: number;
+  /** Fraction of bankroll for tiered rule (`getTieredSuggestedStake(1, …).stake`). */
+  tieredStakeFraction: number;
+  suggestedStakeTier: SuggestedStakeTier;
   calibratedProbability: number;
   marketProbability: number;
   signals: string[];
+  aerHoldWarning?: AerHoldWarning;
+  /** Same thresholds as `aerHoldWarning`; explicit severity for APIs. */
+  aerWarning?: "amber" | "red";
 }
 
 const MIN_CALIBRATION_SAMPLES = 20;
@@ -69,6 +158,42 @@ export function calcAnnualisedReturn(
 ): number {
   if (noPrice <= 0 || daysToResolution <= 0) return 0;
   return ((1 / noPrice - 1) * 365) / daysToResolution;
+}
+
+/**
+ * Time-adjusted implied confidence for layer rules: `price * (1 - (days/365)*0.3)`.
+ * Result clamped to [0, 1] so extreme horizons do not flip signs.
+ */
+export function calcEffectiveConfidence(
+  price: number,
+  daysToResolution: number
+): number {
+  if (!Number.isFinite(price) || price <= 0) return 0;
+  const d = Math.max(0, daysToResolution);
+  const factor = 1 - (d / 365) * 0.3;
+  const v = price * factor;
+  return Math.max(0, Math.min(1, v));
+}
+
+/** Amber / red AER display caveat by days to resolution. */
+export function aerHoldWarningFromDays(
+  daysToResolution: number
+): AerHoldWarning | undefined {
+  if (daysToResolution > 180) {
+    return { severity: "red", message: AER_HOLD_CAVEAT_MESSAGE };
+  }
+  if (daysToResolution > 90) {
+    return { severity: "amber", message: AER_HOLD_CAVEAT_MESSAGE };
+  }
+  return undefined;
+}
+
+export function aerWarningLevelFromDays(
+  daysToResolution: number
+): "amber" | "red" | undefined {
+  if (daysToResolution > 180) return "red";
+  if (daysToResolution > 90) return "amber";
+  return undefined;
 }
 
 /** Rule-of-72 style; `aer` is decimal (e.g. 0.15 = 15%). */
@@ -275,7 +400,7 @@ export function psychologyScore(
 }
 
 /**
- * Opportunity tier. Layer 1 = near-certain, short-dated, high-AER only.
+ * Opportunity tier. Layer 1 = near-certain (time-adjusted confidence), short-dated, high-AER only.
  */
 export function classifyLayer(
   score: number,
@@ -283,19 +408,25 @@ export function classifyLayer(
   daysToResolution: number,
   yesPrice: number,
   noPrice: number,
+  category: string,
   signals?: readonly string[]
 ): "1" | "2" | "3" {
+  const effYes = calcEffectiveConfidence(yesPrice, daysToResolution);
+  const effNo = calcEffectiveConfidence(noPrice, daysToResolution);
   const judgement =
     signals?.some((s) => s.startsWith("behavioural:")) ?? false;
   const layer1Eligible =
     score >= 4 &&
     aer > 0.15 &&
     daysToResolution <= 30 &&
-    (yesPrice > 0.85 || noPrice > 0.85);
-  if (layer1Eligible) return "1";
-  if (score >= 7 && judgement) return "3";
-  if (score >= 4) return "2";
-  return "2";
+    (effYes > 0.85 || effNo > 0.85);
+  let layer: "1" | "2" | "3";
+  if (layer1Eligible) layer = "1";
+  else if (score >= 7 && judgement) layer = "3";
+  else if (score >= 4) layer = "2";
+  else layer = "2";
+
+  return layer;
 }
 
 function decimalOddsFromPrice(price: number): number {
@@ -469,15 +600,28 @@ function scoreMarketToOpportunity(
 
   const psych = evaluatePsychology(market, history, calibratedProbability);
   const kelly = kellyFraction(edge, odds);
-  const layer = classifyLayer(
+  let layer = classifyLayer(
     psych.score,
     aer,
     days,
     market.yes_price,
     market.no_price,
+    market.category,
     psych.signals
   );
+  const signalsOut = [...psych.signals];
+  if (POLITICS_LONG_DATED_RE.test(market.category) && days > 60) {
+    layer = "2";
+    signalsOut.push("[POLITICS_LONG_DATED]");
+  }
   const timeToDouble = calcTimeToDouble(aer);
+  const holdWarn = aerHoldWarningFromDays(days);
+  const aerWarn = aerWarningLevelFromDays(days);
+  const tiered = getTieredSuggestedStake(1, {
+    daysToResolution: days,
+    currentPrice,
+    layer
+  });
 
   if (aer <= MIN_AER_FOR_OPPORTUNITY) return null;
   if (days > MAX_DAYS_FOR_OPPORTUNITY) return null;
@@ -495,9 +639,13 @@ function scoreMarketToOpportunity(
     layer,
     kellyFraction: kelly,
     suggestedStake: kelly * DEFAULT_BANKROLL,
+    tieredStakeFraction: tiered.stake,
+    suggestedStakeTier: tiered.tier,
     calibratedProbability,
     marketProbability,
-    signals: psych.signals
+    signals: signalsOut,
+    ...(holdWarn ? { aerHoldWarning: holdWarn } : {}),
+    ...(aerWarn ? { aerWarning: aerWarn } : {})
   };
 }
 
@@ -663,12 +811,16 @@ export type LiveOpportunity = {
   psychologyScore: number;
   signals: string[];
   suggestedStake: number;
+  tieredStakeFraction: number;
+  suggestedStakeTier: SuggestedStakeTier;
   layer: string;
   kellyFraction: number;
   marketProbability: number;
   calibratedProbability: number;
   aerGross?: number;
   timeToDouble?: number;
+  aerHoldWarning?: AerHoldWarning;
+  aerWarning?: "amber" | "red";
   platform?: "betfair" | "matchbook" | "smarkets";
   commission?: number;
   externalUrl?: string;
@@ -743,11 +895,15 @@ export function scoreMarketsFromRows(
       psychologyScore: op.psychologyScore,
       signals: op.signals,
       suggestedStake: op.suggestedStake,
+      tieredStakeFraction: op.tieredStakeFraction,
+      suggestedStakeTier: op.suggestedStakeTier,
       layer: op.layer,
       kellyFraction: op.kellyFraction,
       marketProbability: op.marketProbability,
       calibratedProbability: op.calibratedProbability,
-      timeToDouble: op.timeToDouble
+      timeToDouble: op.timeToDouble,
+      ...(op.aerHoldWarning ? { aerHoldWarning: op.aerHoldWarning } : {}),
+      ...(op.aerWarning ? { aerWarning: op.aerWarning } : {})
     });
   }
   return out;
@@ -804,14 +960,18 @@ export function scoreResolvedMarketsForBacktest(
       modelDirection === "YES"
         ? calcAnnualisedReturn(entryYes, daysSc)
         : calcAnnualisedReturn(entryNo, daysSc);
-    const layer = classifyLayer(
+    let layer = classifyLayer(
       psych.score,
       aerForLayer,
       daysSc,
       entryYes,
       entryNo,
+      cat,
       psych.signals
     );
+    if (POLITICS_LONG_DATED_RE.test(cat) && daysSc > 60) {
+      layer = "2";
+    }
 
     out.push({
       question,

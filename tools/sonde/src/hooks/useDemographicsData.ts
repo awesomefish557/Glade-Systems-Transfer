@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { DemographicsData, SiteLocation } from '../types'
 import { cacheGet, cacheKey, cacheSet } from '../utils/sessionCache'
 import { fetchJsonSafe } from '../utils/moduleHelpers'
+import { proxied } from '../utils/proxy'
 
 type GenericState<T> =
   | { status: 'idle' }
@@ -25,7 +26,7 @@ export function useDemographicsData(site: SiteLocation | null): DemographicsFetc
     setState({ status: 'loading' })
     ;(async () => {
       const url = `https://api.beta.ons.gov.uk/v1/datasets/TS007/editions/2021/versions/1/observations?area-type=OA,${pseudoCode}`
-      const live = await fetchJsonSafe<OnsObs>(url)
+      const live = await fetchJsonSafe<OnsObs>(proxied(url))
       const totalFallback = Math.max(400, Math.round((Math.abs(site.lat) + Math.abs(site.lng)) * 10))
       const totalPopulation = live?.observations?.length ? live.observations.length * 3 : totalFallback
       const under5 = Math.round(totalPopulation * 0.07)

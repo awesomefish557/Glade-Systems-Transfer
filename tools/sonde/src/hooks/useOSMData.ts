@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { OSMBuilding, OSMPlanData, OSMRoad, OSMTree, OSMWoodland, SiteLocation } from '../types'
+import type { OSMBuilding, OSMPlanData, OSMRailway, OSMRoad, OSMTree, OSMWoodland, SiteLocation } from '../types'
 import { cacheGet, cacheKey, cacheSet } from '../utils/sessionCache'
 import { queryOverpass } from '../utils/overpass'
 
@@ -31,6 +31,7 @@ function parseOverpass(json: OsmJson): OSMPlanData {
   const nodeMap = buildNodes(elements)
   const buildings: OSMBuilding[] = []
   const roads: OSMRoad[] = []
+  const railways: OSMRailway[] = []
   const trees: OSMTree[] = []
   const woodlands: OSMWoodland[] = []
 
@@ -82,15 +83,25 @@ function parseOverpass(json: OsmJson): OSMPlanData {
               ? parsedLevels * 3
               : undefined,
         name: el.tags['name'],
+        buildingName: el.tags['building:name'],
+        addrHousenumber: el.tags['addr:housenumber'],
+        addrStreet: el.tags['addr:street'],
         buildingType: el.tags['building'],
         roofShape: el.tags['roof:shape'],
       })
     }
     if (el.tags.highway) {
+      const w = Number(String(el.tags.width ?? el.tags['est:width'] ?? '').replace(/m$/i, ''))
       roads.push({
         coords,
         highway: el.tags.highway,
+        surface: el.tags.surface,
+        widthM: Number.isFinite(w) && w > 0 ? w : undefined,
       })
+    }
+    const rw = el.tags.railway
+    if (rw && rw !== 'abandoned' && rw !== 'razed' && rw !== 'disused') {
+      railways.push({ coords, railway: rw })
     }
     if (el.tags.landuse === 'forest' || el.tags.natural === 'wood') {
       const closed =
@@ -101,7 +112,14 @@ function parseOverpass(json: OsmJson): OSMPlanData {
     }
   }
 
-  return { buildings, roads, trees, woodlands }
+  return { buildings, roads, railways, trees, woodlands }
+}
+
+function normalizeOsmData(d: OSMPlanData): OSMPlanData {
+  return {
+    ...d,
+    railways: d.railways ?? [],
+  }
 }
 
 async function fetchOverpass(lat: number, lng: number, radiusM: number): Promise<OSMPlanData> {
@@ -114,6 +132,7 @@ async function fetchOverpass(lat: number, lng: number, radiusM: number): Promise
   node["natural"="tree_row"](around:${radiusM},${lat},${lng});
   way["landuse"="forest"](around:${radiusM},${lat},${lng});
   way["natural"="wood"](around:${radiusM},${lat},${lng});
+  way["railway"](around:${radiusM},${lat},${lng});
 );
 out geom;
 `
@@ -147,22 +166,23 @@ export function useOSMData(site: SiteLocation | null, radiusM: number): OSMFetch
       if (raw) {
         const cached = JSON.parse(raw) as { expiresAt: number; data: OSMPlanData }
         if (cached.expiresAt > Date.now()) {
-          setState({ status: 'ok', data: cached.data })
+          setState({ status: 'ok', data: normalizeOsmData(cached.data) })
           return
         }
       }
     } catch {
       const cached = cacheGet<OSMPlanData>(key)
       if (cached) {
-        setState({ status: 'ok', data: cached })
+        setState({ status: 'ok', data: normalizeOsmData(cached) })
         return
       }
     }
     let cancelled = false
     setState({ status: 'loading', message: 'Loading map data... (may take a moment)' })
     fetchOverpass(site.lat, site.lng, radiusM)
-      .then((data) => {
+      .then((raw) => {
         if (cancelled) return
+        const data = normalizeOsmData(raw)
         cacheSet(key, data)
         try {
           localStorage.setItem(key, JSON.stringify({ expiresAt: Date.now() + OSM_CACHE_TTL_MS, data }))

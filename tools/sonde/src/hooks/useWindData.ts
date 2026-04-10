@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { SiteLocation, WindData, WindRoseBin } from '../types'
+import { proxied } from '../utils/proxy'
 import { cacheGet, cacheKey, cacheSet } from '../utils/sessionCache'
 
 const SECTORS = 16
@@ -81,7 +82,7 @@ export function useWindData(site: SiteLocation | null): WindFetchState {
     url.searchParams.set('forecast_days', '1')
     url.searchParams.set('wind_speed_unit', 'ms')
 
-    fetch(url.toString())
+    fetch(proxied(url.toString()))
       .then((r) => {
         if (!r.ok) throw new Error(`Wind API ${r.status}`)
         return r.json()

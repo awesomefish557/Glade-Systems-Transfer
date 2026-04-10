@@ -8,7 +8,16 @@ import type {
   Opportunity,
   TradeMode
 } from "../types";
-import { formatGbp, formatPct, tagsFromSignals } from "../utils";
+import type { PreferredPlatform, SeerSettings } from "../settingsContext";
+import {
+  computeTieredStakeMeta,
+  formatGbp,
+  formatPct,
+  isPoliticsLikeMarket,
+  tagsFromSignals,
+  tieredStakeClass
+} from "../utils";
+import { AerHoldDisplay } from "./AerHoldDisplay";
 
 const LAYER_TITLES: Record<string, string> = {
   "1": "Layer 1: Near Certainty",
@@ -71,7 +80,7 @@ type TableFilter =
   | "highAer"
   | "short14";
 
-type SortKey = "aer" | "days" | "score" | "layer" | "price";
+type SortKey = "aer" | "days" | "score" | "layer" | "price" | "confidence" | "stake";
 type SortDir = "asc" | "desc";
 
 type StakePreset = "kelly" | "equal";
@@ -88,6 +97,10 @@ function defaultSortDir(key: SortKey): SortDir {
       return "asc";
     case "layer":
       return "asc";
+    case "confidence":
+      return "desc";
+    case "stake":
+      return "desc";
     default:
       return "desc";
   }
@@ -114,6 +127,13 @@ function compareOpportunities(
     }
     case "price":
       return mult * (a.currentPrice - b.currentPrice);
+    case "confidence":
+      return mult * (a.currentPrice - b.currentPrice);
+    case "stake": {
+      const fa = computeTieredStakeMeta(a).fraction;
+      const fb = computeTieredStakeMeta(b).fraction;
+      return mult * (fa - fb);
+    }
     default:
       return 0;
   }
@@ -184,6 +204,76 @@ function PlacedBadge() {
       Placed
     </span>
   );
+}
+
+function TieredStakeLine({
+  bankroll,
+  o
+}: {
+  bankroll: number;
+  o: Opportunity;
+}) {
+  const { fraction, tier } = computeTieredStakeMeta(o);
+  const amount = Math.max(0, Math.round(bankroll * fraction));
+  return (
+    <span className={tieredStakeClass(tier)}>
+      {formatGbp(amount, 0)} — Tier {tier}
+    </span>
+  );
+}
+
+function OpenPositionPill({ o }: { o: Opportunity }) {
+  if (!o.hasOpenPosition) return null;
+  const dir = o.openPositionDirection;
+  const want = String(o.direction).toUpperCase() === "NO" ? "NO" : "YES";
+  if (dir == null) {
+    return <span className="opp-placed-badge">● Placed</span>;
+  }
+  const match = dir === want;
+  return (
+    <span
+      className={`opp-placed-badge ${match ? "opp-placed--match" : "opp-placed--warn"}`}
+      title={match ? "Open on same side" : "Open on opposite side"}
+    >
+      {match ? "● Placed ✓" : "● Placed (other side) ⚠"}
+    </span>
+  );
+}
+
+function passesAdvancedFilters(
+  o: Opportunity,
+  opts: {
+    maxDaysCap: number;
+    minConfBar: number;
+    tierBar: "all" | "t1" | "t12";
+    layerBar: "all" | "l1" | "l12";
+    settings: SeerSettings;
+  }
+): boolean {
+  if (o.aer < opts.settings.minAerPercent / 100) return false;
+  if (
+    opts.settings.maxDays < 9990 &&
+    o.daysToResolution > opts.settings.maxDays
+  ) {
+    return false;
+  }
+  if (
+    !opts.settings.showPolitics &&
+    isPoliticsLikeMarket(o.category, o.question)
+  ) {
+    return false;
+  }
+  if (opts.maxDaysCap < 9990 && o.daysToResolution > opts.maxDaysCap) {
+    return false;
+  }
+  if (o.currentPrice < opts.minConfBar) return false;
+  const tier = computeTieredStakeMeta(o).tier;
+  if (opts.tierBar === "t1" && tier !== 1) return false;
+  if (opts.tierBar === "t12" && tier !== 1 && tier !== 2) return false;
+  const L = String(o.layer);
+  if (opts.layerBar === "l1" && L !== "1") return false;
+  if (opts.layerBar === "l12" && L !== "1" && L !== "2") return false;
+  return true;
 }
 
 const FILTER_CHIPS: { id: TableFilter; label: string }[] = [
@@ -264,7 +354,7 @@ export default function OpportunitiesTable({
   onAfterBet: () => void | Promise<void>;
   onSuccess: (msg: string) => void;
 }) {
-  const { settings } = useSeerSettings();
+  const { settings, setSettings } = useSeerSettings();
   const bankroll = settings.bankroll;
   const { placedMarketIds, refetchOpenPositions } = useOpenPositionMarketIds(
     mode === "paper" ? "paper" : "live"
@@ -281,6 +371,18 @@ export default function OpportunitiesTable({
     CalibrationBucketRow[] | null
   >(null);
   const [stakePreset, setStakePreset] = useState<StakePreset>("kelly");
+  const [maxDaysCap, setMaxDaysCap] = useState<number>(9999);
+  const [minConfBar, setMinConfBar] = useState<number>(0.9);
+  const [tierBar, setTierBar] = useState<"all" | "t1" | "t12">("all");
+  const [layerBar, setLayerBar] = useState<"all" | "l1" | "l12">("all");
+  const [manualModal, setManualModal] = useState<Opportunity | null>(null);
+  const [manualStake, setManualStake] = useState("");
+  const [manualPrice, setManualPrice] = useState("");
+  const [manualBetId, setManualBetId] = useState("");
+  const [manualPlatform, setManualPlatform] =
+    useState<PreferredPlatform>("betfair");
+  const [manualErr, setManualErr] = useState<string | null>(null);
+  const [manualSubmitting, setManualSubmitting] = useState(false);
 
   useEffect(() => {
     if (!modal) {
@@ -307,9 +409,21 @@ export default function OpportunitiesTable({
     const kellyStake = Math.max(1, kellyRounded);
     const count = Math.max(1, opportunities.length);
     const equalStake = Math.max(1, Math.round(bankroll / count));
-    const v = stakePreset === "kelly" ? kellyStake : equalStake;
+    const v =
+      stakePreset === "kelly"
+        ? Math.max(1, kellyStake, Math.round(settings.defaultStake))
+        : equalStake;
     setStakeInput(String(v));
-  }, [modal, bankroll, stakePreset, opportunities.length]);
+  }, [modal, bankroll, stakePreset, opportunities.length, settings.defaultStake]);
+
+  useEffect(() => {
+    if (!manualModal) return;
+    setManualPlatform(settings.preferredPlatform);
+    setManualPrice(String(manualModal.currentPrice));
+    setManualStake(String(Math.max(1, Math.round(settings.defaultStake))));
+    setManualBetId("");
+    setManualErr(null);
+  }, [manualModal, settings.preferredPlatform, settings.defaultStake]);
 
   useEffect(() => {
     if (!successMsg) return;
@@ -330,8 +444,122 @@ export default function OpportunitiesTable({
     return [...opportunities]
       .filter((o) => o.daysToResolution >= 0.5)
       .filter((o) => passesFilter(o, filter))
+      .filter((o) =>
+        passesAdvancedFilters(o, {
+          maxDaysCap,
+          minConfBar,
+          tierBar,
+          layerBar,
+          settings
+        })
+      )
       .sort((a, b) => compareOpportunities(a, b, sortKey, sortDir));
-  }, [opportunities, filter, sortKey, sortDir]);
+  }, [
+    opportunities,
+    filter,
+    sortKey,
+    sortDir,
+    maxDaysCap,
+    minConfBar,
+    tierBar,
+    layerBar,
+    settings
+  ]);
+
+  async function confirmManualBet() {
+    if (!manualModal) return;
+    setManualErr(null);
+    const stake = Number.parseFloat(String(manualStake).replace(/,/g, ""));
+    const price = Number.parseFloat(String(manualPrice).replace(/,/g, ""));
+    if (!Number.isFinite(stake) || stake < 1) {
+      setManualErr("Stake must be at least £1.");
+      return;
+    }
+    if (!Number.isFinite(price) || price <= 0 || price >= 1) {
+      setManualErr("Price must be between 0 and 1 (e.g. 0.93).");
+      return;
+    }
+    const direction = normalizeBetDirection(manualModal.direction);
+    if (!direction) {
+      setManualErr(
+        `Invalid direction "${manualModal.direction}" (expected YES or NO).`
+      );
+      return;
+    }
+    const layerParsed = parseInt(
+      String(manualModal.layer).replace(/^L/i, ""),
+      10
+    );
+    const layer =
+      layerParsed === 1 || layerParsed === 2 || layerParsed === 3
+        ? layerParsed
+        : undefined;
+    const body: Record<string, unknown> = {
+      marketId: String(manualModal.marketId),
+      direction,
+      stake,
+      mode: "live",
+      platform: manualPlatform,
+      price,
+      signals: manualModal.signals ?? []
+    };
+    if (layer !== undefined) body.layer = layer;
+    if (manualBetId.trim()) body.platformBetId = manualBetId.trim();
+
+    setManualSubmitting(true);
+    try {
+      const res = await fetch(apiUrl("/api/positions"), {
+        method: "POST",
+        headers: apiHeaders(),
+        body: JSON.stringify(body)
+      });
+      let data: Record<string, unknown> | null = null;
+      try {
+        data = (await res.json()) as Record<string, unknown>;
+      } catch {
+        data = null;
+      }
+      if (!res.ok) {
+        let msg =
+          (data && typeof data.message === "string" ? data.message : null) ??
+          String(res.status);
+        const ve = data?.validationErrors as
+          | { field: string; reason: string }[]
+          | undefined;
+        if (Array.isArray(ve) && ve.length > 0) {
+          msg = `${msg}: ${ve.map((e) => `${e.field}: ${e.reason}`).join("; ")}`;
+        }
+        setManualErr(`Failed: ${msg}`);
+        return;
+      }
+      const posResult = data as {
+        ok?: boolean;
+        positionId?: number;
+        error?: string;
+      } | null;
+      if (posResult?.ok !== true || posResult.positionId == null) {
+        const fallback =
+          typeof posResult?.error === "string"
+            ? posResult.error
+            : "Server did not confirm position (ok / positionId missing).";
+        setManualErr(`Failed: ${fallback}`);
+        return;
+      }
+      setSuccessMsg("✓ Manual live bet logged");
+      onSuccess(
+        `Manual bet logged: ${manualModal.question.slice(0, 40)}...`
+      );
+      await Promise.resolve(onAfterBet());
+      await refetchOpenPositions();
+      setManualModal(null);
+    } catch (e) {
+      setManualErr(
+        e instanceof Error ? `Failed: ${e.message}` : `Failed: ${String(e)}`
+      );
+    } finally {
+      setManualSubmitting(false);
+    }
+  }
 
   async function confirmBet() {
     if (!modal) return;
@@ -473,6 +701,93 @@ export default function OpportunitiesTable({
             </button>
           ))}
         </div>
+        <div
+          className="opp-filter-advanced"
+          role="toolbar"
+          aria-label="Refine and sort opportunities"
+        >
+          <label>
+            Max days{" "}
+            <select
+              value={maxDaysCap}
+              onChange={(e) => setMaxDaysCap(Number(e.target.value))}
+            >
+              <option value={7}>7</option>
+              <option value={14}>14</option>
+              <option value={30}>30</option>
+              <option value={60}>60</option>
+              <option value={90}>90</option>
+              <option value={9999}>Any</option>
+            </select>
+          </label>
+          <label>
+            Min confidence{" "}
+            <select
+              value={minConfBar}
+              onChange={(e) => setMinConfBar(Number(e.target.value))}
+            >
+              <option value={0.9}>90%</option>
+              <option value={0.93}>93%</option>
+              <option value={0.95}>95%</option>
+              <option value={0.97}>97%</option>
+            </select>
+          </label>
+          <label className="toggle-wrap">
+            <input
+              type="checkbox"
+              checked={!settings.showPolitics}
+              onChange={(e) =>
+                setSettings({ showPolitics: !e.target.checked })
+              }
+            />
+            Hide politics
+          </label>
+          <label>
+            Tier{" "}
+            <select
+              value={tierBar}
+              onChange={(e) =>
+                setTierBar(e.target.value as "all" | "t1" | "t12")
+              }
+            >
+              <option value="all">All</option>
+              <option value="t1">Tier 1 only</option>
+              <option value="t12">Tier 1+2</option>
+            </select>
+          </label>
+          <label>
+            Layer{" "}
+            <select
+              value={layerBar}
+              onChange={(e) =>
+                setLayerBar(e.target.value as "all" | "l1" | "l12")
+              }
+            >
+              <option value="l1">L1 only</option>
+              <option value="l12">L1+2</option>
+              <option value="all">All</option>
+            </select>
+          </label>
+          <label>
+            Sort by{" "}
+            <select
+              value={sortKey}
+              onChange={(e) => {
+                const k = e.target.value as SortKey;
+                setSortKey(k);
+                setSortDir(defaultSortDir(k));
+              }}
+            >
+              <option value="aer">AER</option>
+              <option value="days">Days to resolution</option>
+              <option value="confidence">Confidence</option>
+              <option value="stake">Suggested stake</option>
+              <option value="score">Psychology score</option>
+              <option value="layer">Layer</option>
+              <option value="price">Price</option>
+            </select>
+          </label>
+        </div>
         <div className="table-wrap opp-desktop-wrap">
           <table className="data-table">
             <thead>
@@ -515,6 +830,13 @@ export default function OpportunitiesTable({
                   sortDir={sortDir}
                   onSort={handleSortClick}
                 />
+                <SortTh
+                  label="Tier stake"
+                  sortKey="stake"
+                  activeKey={sortKey}
+                  sortDir={sortDir}
+                  onSort={handleSortClick}
+                />
                 <th>Signals</th>
                 <th>Bet</th>
               </tr>
@@ -522,7 +844,7 @@ export default function OpportunitiesTable({
             <tbody>
               {sortedFiltered.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="empty">
+                  <td colSpan={11} className="empty">
                     {opportunities.length === 0
                       ? "No opportunities found above threshold. Next analysis runs at 6:00 AM."
                       : "No rows match this filter."}
@@ -537,7 +859,9 @@ export default function OpportunitiesTable({
                     <td className="market-cell">
                       <div className="market-cell-row">
                         <span>{o.question}</span>
-                        {placedMarketIds.has(String(o.marketId)) ? (
+                        {o.hasOpenPosition ? (
+                          <OpenPositionPill o={o} />
+                        ) : placedMarketIds.has(String(o.marketId)) ? (
                           <PlacedBadge />
                         ) : null}
                       </div>
@@ -546,7 +870,14 @@ export default function OpportunitiesTable({
                     <td className="num">{o.direction}</td>
                     <td className="num">{fmtPrice(o.currentPrice)}</td>
                     <td className="num">{fmtDays(o.daysToResolution)}</td>
-                    <td className="num">{formatPct(o.aer, 1)}</td>
+                    <td className="num aer-cell">
+                      <AerHoldDisplay
+                        aer={o.aer}
+                        daysToResolution={o.daysToResolution}
+                        aerHoldWarning={o.aerHoldWarning}
+                        aerWarning={o.aerWarning}
+                      />
+                    </td>
                     <td className="num">
                       {Number.isFinite(o.timeToDouble) && o.timeToDouble > 0
                         ? `${o.timeToDouble.toFixed(0)}d`
@@ -558,6 +889,9 @@ export default function OpportunitiesTable({
                         psychologyScore={o.psychologyScore}
                       />
                     </td>
+                    <td className="tier-stake-cell">
+                      <TieredStakeLine bankroll={bankroll} o={o} />
+                    </td>
                     <td>
                       <div className="tag-row">
                         {tagsFromSignals(o.signals).map((t) => (
@@ -567,7 +901,7 @@ export default function OpportunitiesTable({
                         ))}
                       </div>
                     </td>
-                    <td>
+                    <td className="opp-bet-cell">
                       <button
                         type="button"
                         className={`btn-bet ${mode}`}
@@ -579,6 +913,17 @@ export default function OpportunitiesTable({
                       >
                         Bet
                       </button>
+                      {mode === "live" ? (
+                        <button
+                          type="button"
+                          className="btn-manual-bet"
+                          onClick={() => {
+                            setManualModal(o);
+                          }}
+                        >
+                          Log manual
+                        </button>
+                      ) : null}
                     </td>
                   </tr>
                 ))
@@ -607,7 +952,9 @@ export default function OpportunitiesTable({
                 >
                   <div className="opp-card-q market-cell-row">
                     <span>{o.question}</span>
-                    {placedMarketIds.has(String(o.marketId)) ? (
+                    {o.hasOpenPosition ? (
+                      <OpenPositionPill o={o} />
+                    ) : placedMarketIds.has(String(o.marketId)) ? (
                       <PlacedBadge />
                     ) : null}
                   </div>
@@ -617,7 +964,15 @@ export default function OpportunitiesTable({
                     {o.daysToResolution === 1 ? "day" : "days"}
                   </div>
                   <div className="opp-card-row2">
-                    <span>AER: {formatPct(o.aer, 1)}</span>
+                    <div className="opp-card-aer">
+                      <span className="opp-card-aer-prefix">AER: </span>
+                      <AerHoldDisplay
+                        aer={o.aer}
+                        daysToResolution={o.daysToResolution}
+                        aerHoldWarning={o.aerHoldWarning}
+                        aerWarning={o.aerWarning}
+                      />
+                    </div>
                     <span className="opp-card-layer">
                       L{o.layer}
                       <ScoreDots
@@ -626,6 +981,9 @@ export default function OpportunitiesTable({
                       />
                     </span>
                   </div>
+                  <div className="opp-card-tier-stake">
+                    <TieredStakeLine bankroll={bankroll} o={o} />
+                  </div>
                   <div className="tag-row opp-card-tags">
                     {tagsFromSignals(o.signals).map((t) => (
                       <span key={t} className="signal-tag">
@@ -633,7 +991,7 @@ export default function OpportunitiesTable({
                       </span>
                     ))}
                   </div>
-                  <div className="opp-card-actions">
+                  <div className="opp-card-actions opp-bet-cell">
                     <button
                       type="button"
                       className={`btn-bet ${mode}`}
@@ -645,6 +1003,15 @@ export default function OpportunitiesTable({
                     >
                       BET {formatGbp(betStake, 0)}
                     </button>
+                    {mode === "live" ? (
+                      <button
+                        type="button"
+                        className="btn-manual-bet"
+                        onClick={() => setManualModal(o)}
+                      >
+                        Log manual
+                      </button>
+                    ) : null}
                   </div>
                 </div>
               );
@@ -726,11 +1093,25 @@ export default function OpportunitiesTable({
                     Kelly fraction {formatPct(modal.kellyFraction, 2)}, bankroll{" "}
                     {formatGbp(bankroll, 0)}
                   </span>
+                  <div
+                    className="tier-stake-modal-line"
+                    style={{ marginTop: "0.35rem" }}
+                  >
+                    Tiered: <TieredStakeLine bankroll={bankroll} o={modal} />
+                  </div>
                 </dd>
               </div>
               <div>
                 <dt>AER</dt>
-                <dd>{formatPct(modal.aer, 2)}</dd>
+                <dd>
+                  <AerHoldDisplay
+                    aer={modal.aer}
+                    daysToResolution={modal.daysToResolution}
+                    aerHoldWarning={modal.aerHoldWarning}
+                    aerWarning={modal.aerWarning}
+                    decimals={2}
+                  />
+                </dd>
               </div>
               <div>
                 <dt>Time to double</dt>
@@ -840,6 +1221,120 @@ export default function OpportunitiesTable({
                 disabled={submitting}
               >
                 {submitting ? "ÔÇª" : "Confirm"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {manualModal && (
+        <div
+          className="modal-backdrop modal-backdrop--bet"
+          role="presentation"
+          onClick={(e) => {
+            if (e.target !== e.currentTarget) return;
+            setManualModal(null);
+          }}
+        >
+          <div
+            className="modal modal--bet"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="manual-bet-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="modal-bet-close"
+              onClick={() => setManualModal(null)}
+              aria-label="Close"
+            >
+              Ô£ò
+            </button>
+            <h3 id="manual-bet-title" className="modal-bet-title">
+              Log manual bet
+            </h3>
+            <p
+              className="muted"
+              style={{ fontSize: "0.72rem", marginTop: "-0.35rem" }}
+            >
+              {manualModal.question}
+            </p>
+            {manualErr && (
+              <div className="modal-error" role="alert">
+                {manualErr}
+              </div>
+            )}
+            <div className="modal-stake-field">
+              <label htmlFor="manual-platform">Platform</label>
+              <select
+                id="manual-platform"
+                value={manualPlatform}
+                onChange={(e) =>
+                  setManualPlatform(e.target.value as PreferredPlatform)
+                }
+                disabled={manualSubmitting}
+              >
+                <option value="betfair">Betfair</option>
+                <option value="matchbook">Matchbook</option>
+                <option value="smarkets">Smarkets</option>
+              </select>
+            </div>
+            <div className="modal-stake-field">
+              <label htmlFor="manual-stake">Stake (£)</label>
+              <input
+                id="manual-stake"
+                type="text"
+                inputMode="decimal"
+                value={manualStake}
+                onChange={(e) => setManualStake(e.target.value)}
+                disabled={manualSubmitting}
+                autoComplete="off"
+              />
+            </div>
+            <div className="modal-stake-field">
+              <label htmlFor="manual-price">Price (0–1)</label>
+              <input
+                id="manual-price"
+                type="text"
+                inputMode="decimal"
+                value={manualPrice}
+                onChange={(e) => setManualPrice(e.target.value)}
+                disabled={manualSubmitting}
+                autoComplete="off"
+              />
+            </div>
+            <div className="modal-stake-field">
+              <label htmlFor="manual-bet-id">Bet ID (optional)</label>
+              <input
+                id="manual-bet-id"
+                type="text"
+                value={manualBetId}
+                onChange={(e) => setManualBetId(e.target.value)}
+                disabled={manualSubmitting}
+                autoComplete="off"
+              />
+            </div>
+            <p className="muted" style={{ fontSize: "0.68rem" }}>
+              Direction {manualModal.direction}; logs a live position (manual
+              entry).
+            </p>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={() => setManualModal(null)}
+                disabled={manualSubmitting}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => void confirmManualBet()}
+                disabled={manualSubmitting}
+              >
+                {manualSubmitting ? "ÔÇª" : "Log bet"}
               </button>
             </div>
           </div>

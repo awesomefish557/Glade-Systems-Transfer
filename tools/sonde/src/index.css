@@ -316,22 +316,32 @@ body {
 }
 
 .sonde-map-wrap {
-  position: relative;
-  height: 500px;
-  min-height: 500px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
   border-bottom: 1px solid var(--sonde-edge);
+}
+
+.sonde-map-stage {
+  position: relative;
+  width: 100%;
+  height: 500px;
+  min-height: 400px;
+  flex-shrink: 0;
 }
 
 .sonde-map {
   position: absolute;
   inset: 0;
+  z-index: 1;
 }
 
 .sonde-map-overlay {
   position: absolute;
   top: 10px;
   left: 10px;
-  z-index: 6;
+  z-index: 4;
   display: flex;
   gap: 0.65rem;
   font-size: 0.68rem;
@@ -339,6 +349,318 @@ body {
   background: rgba(15, 13, 11, 0.82);
   border: 1px solid #3b3229;
   padding: 0.35rem 0.5rem;
+  color: var(--sonde-ink-soft);
+}
+
+.sonde-map-overlay--sun {
+  gap: 0;
+}
+
+.sonde-map-corner-actions {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 11;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sonde-map-icon-btn {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  line-height: 1;
+  border-radius: 4px;
+  border: 1px solid #4a4338;
+  background: rgba(18, 16, 14, 0.92);
+  color: var(--sonde-ink-soft);
+  cursor: pointer;
+}
+
+.sonde-map-icon-btn:hover {
+  border-color: var(--sonde-accent-orange);
+  color: var(--sonde-ink);
+}
+
+.sonde-map-icon-btn--active {
+  border-color: var(--sonde-accent-blue);
+  color: var(--sonde-ink);
+}
+
+.sonde-map-hud {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(320px, calc(100% - 48px));
+  z-index: 10;
+  background: rgba(12, 11, 10, 0.97);
+  border-left: 1px solid var(--sonde-edge);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.sonde-map-hud-inner {
+  padding: 0.65rem 0.75rem 1rem;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.sonde-map-hud-title {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--sonde-ink-muted);
+}
+
+.sonde-map-hud-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.sonde-map-hud-label {
+  margin: 0;
+  font-size: 0.65rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--sonde-ink-muted);
+}
+
+.sonde-map-hud-hint {
+  margin: 0;
+  font-size: 0.68rem;
+}
+
+.sonde-map-hud-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.sonde-map-hud-sliders {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.sonde-map-hud-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.sonde-map-hud-shadow-study {
+  margin-top: 0.25rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--sonde-edge);
+}
+
+.sonde-map-hud-subhead {
+  margin: 0 0 0.5rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--sonde-ink-soft);
+}
+
+.sonde-map-hud-card-grid {
+  grid-template-columns: 1fr;
+}
+
+.sonde-section-float {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  z-index: 9;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: min(520px, calc(100% - 24px));
+  padding: 0.4rem 0.5rem;
+  background: rgba(14, 13, 12, 0.94);
+  border: 1px solid #3b3229;
+  border-radius: 4px;
+}
+
+.sonde-section-float .sonde-btn {
+  font-size: 0.68rem;
+  padding: 0.28rem 0.45rem;
+}
+
+.sonde-section-float-scale {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0;
+  font-size: 0.7rem;
+}
+
+.sonde-section-float-scale select {
+  font-size: 0.7rem;
+  padding: 0.2rem 0.35rem;
+}
+
+.sonde-terrain-status {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: nowrap;
+  min-height: 28px;
+  padding: 0.2rem 0.45rem 0.2rem 0.35rem;
+  font-size: 10px;
+  line-height: 1.35;
+  background: rgba(14, 13, 12, 0.96);
+  color: #b0aaa0;
+  border-top: 1px solid var(--sonde-edge);
+}
+
+.sonde-terrain-status-text {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sonde-terrain-status--expanded .sonde-terrain-status-text {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+}
+
+.sonde-terrain-status-chevron {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid #3b3229;
+  border-radius: 2px;
+  background: #161411;
+  color: var(--sonde-ink-muted);
+  cursor: pointer;
+  font-size: 0.75rem;
+  line-height: 1;
+}
+
+.sonde-terrain-status-chevron:hover {
+  color: var(--sonde-ink-soft);
+  border-color: #5c5348;
+}
+
+.sonde-terrain-status-extra {
+  flex: 1 1 100%;
+  padding: 0.35rem 0 0 32px;
+  border-top: 1px solid #252320;
+  margin-top: 0.25rem;
+}
+
+.sonde-section-chart-wrap {
+  border-bottom: 1px solid var(--sonde-edge);
+  background: #0e0d0c;
+}
+
+.sonde-section-chart-wrap .sonde-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 340px;
+}
+
+.sonde-btn--block {
+  width: 100%;
+  justify-content: center;
+}
+
+.sonde-root--map-fs .sonde-topbar,
+.sonde-root--map-fs .sonde-sidebar,
+.sonde-root--map-fs .sonde-panel-wrap,
+.sonde-root--map-fs .sonde-service-indicator,
+.sonde-root--map-fs .sonde-terrain-status,
+.sonde-root--map-fs .sonde-map-overlay,
+.sonde-root--map-fs .sonde-map-lidar-badge {
+  display: none !important;
+}
+
+.sonde-root--map-fs .sonde-body {
+  flex: 1;
+  min-height: 0;
+}
+
+.sonde-root--map-fs .sonde-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sonde-root--map-fs .sonde-map-wrap {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+  border-bottom: none;
+}
+
+.sonde-root--map-fs .sonde-map-stage {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+}
+
+.sonde-root--map-fs .sonde-terrain-status {
+  flex-shrink: 0;
+}
+
+.sonde-map-stage--hud-open .sonde-map-lidar-badge {
+  right: auto;
+  left: 10px;
+  top: 10px;
+  text-align: left;
+}
+
+.sonde-map-lidar-badge {
+  position: absolute;
+  top: 52px;
+  right: 10px;
+  z-index: 5;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  padding: 0.35rem 0.55rem;
+  border-radius: 4px;
+  pointer-events: none;
+  max-width: min(200px, 42vw);
+  line-height: 1.25;
+  text-align: right;
+}
+
+.sonde-map-lidar-badge--ok {
+  background: rgba(28, 110, 58, 0.92);
+  border: 1px solid #3cb371;
+  color: #e8fff0;
+}
+
+.sonde-map-lidar-badge--warn {
+  background: rgba(120, 75, 18, 0.92);
+  border: 1px solid #d4a017;
+  color: #fff8e8;
+}
+
+.sonde-map-lidar-badge--loading {
+  background: rgba(40, 38, 36, 0.9);
+  border: 1px solid #5c5348;
   color: var(--sonde-ink-soft);
 }
 
@@ -847,6 +1169,12 @@ body {
   .sonde-map-wrap {
     height: min(42vh, 380px);
     min-height: 260px;
+  }
+
+  .sonde-map-stage {
+    flex: 1;
+    height: 100%;
+    min-height: 0;
   }
 
   .sonde-topbar {

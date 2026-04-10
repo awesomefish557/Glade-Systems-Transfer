@@ -560,18 +560,7 @@ export function ExportModule({
           <SolarModule data={solar} />
         </div>
         <div className="sonde-export-col">
-          <BaseMapModule
-            site={site}
-            radiusM={radiusM}
-            onRadius={onRadius}
-            historicalYear="modern"
-            onHistoricalYear={() => undefined}
-            historicalOpacity={0.45}
-            onHistoricalOpacity={() => undefined}
-            historicalEnabled={false}
-            onHistoricalEnabled={() => undefined}
-            state={osm}
-          />
+          <BaseMapModule site={site} radiusM={radiusM} onRadius={onRadius} state={osm} />
         </div>
         <div className="sonde-export-col sonde-export-col--full">
           <ClimateModule state={climate} />

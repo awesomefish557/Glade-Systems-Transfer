@@ -5,12 +5,14 @@ import {
   autoResolveOpenPositions,
   getAppMeta,
   getMarketForPosition,
+  countOpenPositionsForMarketAndDirection,
   clearOpportunities,
   getOpportunitiesLastUpdated,
   insertOpenPosition,
   insertOpportunities,
   listCalibrationRows,
   listPositionsWithMarket,
+  listOpenPositionsMarketDirections,
   listStoredOpportunities,
   rebuildCalibrationFromMarkets,
   replaceOpportunities,
@@ -371,7 +373,20 @@ export default {
           direction: dir,
           stake
         });
-        if (!r.ok) return json({ ok: false, error: r.error }, 400);
+        if (!r.ok) {
+          if (r.error === "duplicate_position") {
+            return json(
+              {
+                ok: false,
+                error: "duplicate_position",
+                message:
+                  "Already have an open position on this market in this direction"
+              },
+              400
+            );
+          }
+          return json({ ok: false, error: r.error }, 400);
+        }
         return json({
           ok: true,
           betId: r.betId,
@@ -381,13 +396,19 @@ export default {
       }
 
       if (path === "/api/opportunities" && request.method === "GET") {
-        const [opportunities, aerCalc] = await Promise.all([
+        const [opportunities, aerCalc, openByMarket] = await Promise.all([
           listStoredOpportunities(env.DB),
-          portfolioAerCalculator(env)
+          portfolioAerCalculator(env),
+          listOpenPositionsMarketDirections(env.DB)
         ]);
+        const enriched = opportunities.map((o) => ({
+          ...o,
+          hasOpenPosition: openByMarket.has(o.marketId),
+          openPositionDirection: openByMarket.get(o.marketId) ?? null
+        }));
         return json({
-          opportunities,
-          count: opportunities.length,
+          opportunities: enriched,
+          count: enriched.length,
           aerSinceLaunch: aerCalc.aerSinceLaunch,
           timeToDoubleDays: aerCalc.timeToDoubleDays,
           totalProfitLoss: aerCalc.totalProfitLoss,
@@ -705,6 +726,9 @@ function parsePositionPostBody(body: Record<string, unknown>): {
   mode: "PAPER" | "LIVE";
   layer: string | null;
   signalsJson: string | null;
+  platform: "betfair" | "matchbook" | "smarkets" | null;
+  platformBetId: string | null;
+  entryPriceOverride: number | null;
 } | {
   ok: false;
   validationErrors: Array<{ field: string; reason: string }>;
@@ -815,6 +839,33 @@ function parsePositionPostBody(body: Record<string, unknown>): {
     }
   }
 
+  const platRaw = b.platform;
+  let platform: "betfair" | "matchbook" | "smarkets" | null = null;
+  if (typeof platRaw === "string") {
+    const p = platRaw.trim().toLowerCase();
+    if (p === "betfair" || p === "matchbook" || p === "smarkets") {
+      platform = p;
+    }
+  }
+
+  const bidRaw = b.platformBetId ?? b.betId;
+  const platformBetId =
+    bidRaw != null && String(bidRaw).trim() !== ""
+      ? String(bidRaw).trim()
+      : null;
+
+  const epRaw = b.entryPrice ?? b.price;
+  let entryPriceOverride: number | null = null;
+  if (epRaw !== undefined && epRaw !== null) {
+    const ep =
+      typeof epRaw === "number"
+        ? epRaw
+        : Number(String(epRaw).replace(/,/g, "").trim());
+    if (Number.isFinite(ep) && ep > 0 && ep < 1) {
+      entryPriceOverride = ep;
+    }
+  }
+
   if (errors.length > 0) return { ok: false, validationErrors: errors };
   return {
     ok: true,
@@ -823,7 +874,10 @@ function parsePositionPostBody(body: Record<string, unknown>): {
     stake: stakeNum,
     mode: mode!,
     layer,
-    signalsJson
+    signalsJson,
+    platform,
+    platformBetId,
+    entryPriceOverride
   };
 }
 
@@ -855,7 +909,17 @@ async function handlePostPositionBody(
     );
   }
 
-  const { marketId, direction, stake, mode, layer, signalsJson } = parsed;
+  const {
+    marketId,
+    direction,
+    stake,
+    mode,
+    layer,
+    signalsJson,
+    platform,
+    platformBetId,
+    entryPriceOverride
+  } = parsed;
 
   console.log("[seer] POST /api/positions body:", JSON.stringify(b));
   console.log("[seer] entry_price lookup for market:", marketId);
@@ -865,8 +929,17 @@ async function handlePostPositionBody(
     return json({ error: "market_not_found", marketId }, 404);
   }
 
-  const entryPrice =
+  let entryPrice =
     direction === "YES" ? market.yes_price : market.no_price;
+  if (
+    mode === "LIVE" &&
+    entryPriceOverride != null &&
+    Number.isFinite(entryPriceOverride) &&
+    entryPriceOverride > 0 &&
+    entryPriceOverride < 1
+  ) {
+    entryPrice = entryPriceOverride;
+  }
   if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
     console.warn("[seer] POST /api/positions bad entry price from market", {
       marketId,
@@ -886,6 +959,41 @@ async function handlePostPositionBody(
     );
   }
 
+  if (
+    (await countOpenPositionsForMarketAndDirection(
+      env.DB,
+      marketId,
+      direction
+    )) > 0
+  ) {
+    return json(
+      {
+        ok: false,
+        error: "duplicate_position",
+        message:
+          "Already have an open position on this market in this direction"
+      },
+      400
+    );
+  }
+
+  const platformOddsClamped = Math.max(
+    1.01,
+    Math.min(2000, 1 / Math.max(entryPrice, 1e-6))
+  );
+  const storedPlatform = mode === "LIVE" && platform ? platform : null;
+  let mergedSignals = signalsJson ?? "[]";
+  if (mode === "LIVE" && storedPlatform) {
+    try {
+      const arr = JSON.parse(mergedSignals) as unknown;
+      const list = Array.isArray(arr) ? arr.map(String) : [];
+      list.push(`[MANUAL_LOG:${storedPlatform}]`);
+      mergedSignals = JSON.stringify(list);
+    } catch {
+      mergedSignals = JSON.stringify([`[MANUAL_LOG:${storedPlatform}]`]);
+    }
+  }
+
   let insertResult: { id: number };
   try {
     insertResult = await insertOpenPosition(env.DB, {
@@ -895,11 +1003,11 @@ async function handlePostPositionBody(
       mode,
       entryPrice,
       layer,
-      signalsJson,
+      signalsJson: mergedSignals,
       marketQuestion: market.question,
-      platform: null,
-      platform_bet_id: null,
-      platform_odds: null,
+      platform: storedPlatform,
+      platform_bet_id: platformBetId,
+      platform_odds: storedPlatform ? platformOddsClamped : null,
       appliedCommission: 0
     });
   } catch (e) {

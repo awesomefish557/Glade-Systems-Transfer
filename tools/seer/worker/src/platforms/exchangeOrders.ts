@@ -1,6 +1,7 @@
 import type { Env } from "../db";
 import {
   deletePositionById,
+  hasOpenPositionForMarketAndDirection,
   insertOpenPosition,
   updatePositionPlatformBetId,
   upsertMarket,
@@ -30,6 +31,16 @@ export async function placeExchangeBetAndOpenPosition(
         : null;
   if (platform !== "betfair" && platform !== "matchbook") {
     return { ok: false, error: "unsupported_platform" };
+  }
+
+  if (
+    await hasOpenPositionForMarketAndDirection(
+      env.DB,
+      market.id,
+      params.direction
+    )
+  ) {
+    return { ok: false, error: "duplicate_position" };
   }
 
   const entryPrice =

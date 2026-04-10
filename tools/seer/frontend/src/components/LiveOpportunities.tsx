@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { fetchJson, postJson } from "../api";
 import { useOpenPositionMarketIds } from "../hooks/useOpenPositionMarketIds";
+import { useSeerSettings } from "../settingsContext";
 import type {
   ComparisonPlatformKey,
   LiveArbitrageRow,
@@ -10,7 +11,14 @@ import type {
   LivePlatformComparison,
   PriceFeedStatus
 } from "../types";
-import { formatCompactVolume, formatGbp, formatPct, tagsFromSignals } from "../utils";
+import { AerHoldDisplay } from "./AerHoldDisplay";
+import {
+  formatCompactVolume,
+  formatGbp,
+  formatPct,
+  formatTieredSuggestedStakeLine,
+  tagsFromSignals
+} from "../utils";
 
 type PlatformFilter = "all" | LivePlatform;
 
@@ -149,6 +157,8 @@ export default function LiveOpportunities() {
   const [betBusy, setBetBusy] = useState<string | null>(null);
   const { placedMarketIds, refetchOpenPositions } =
     useOpenPositionMarketIds("any");
+  const { settings } = useSeerSettings();
+  const bankroll = settings.bankroll;
 
   const load = useCallback(async () => {
     setErr(null);
@@ -398,6 +408,7 @@ export default function LiveOpportunities() {
               <th>Price</th>
               <th>Days</th>
               <th>AER</th>
+              <th>Tier stake</th>
               <th>Score</th>
               <th>Signals</th>
               <th className="live-bet-col">Bet</th>
@@ -406,7 +417,7 @@ export default function LiveOpportunities() {
           <tbody>
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={9} className="empty">
+                <td colSpan={10} className="empty">
                   {loading ? "…" : "No rows match this filter (or below Seer thresholds)."}
                 </td>
               </tr>
@@ -431,12 +442,25 @@ export default function LiveOpportunities() {
                       <td className="num">{o.direction}</td>
                       <td className="num">{o.currentPrice.toFixed(3)}</td>
                       <td className="num">{fmtDays(o.daysToResolution)}</td>
-                      <td className="num">
-                        {formatPct(o.aer, 1)}{" "}
+                      <td className="num aer-cell">
+                        <AerHoldDisplay
+                          aer={o.aer}
+                          daysToResolution={o.daysToResolution}
+                          aerHoldWarning={o.aerHoldWarning}
+                        />
                         <span className="muted live-aer-sub">
                           (after {(o.commission * 100).toFixed(0)}% fee; gross{" "}
                           {formatPct(o.aerGross, 1)})
                         </span>
+                      </td>
+                      <td className="tier-stake-cell">
+                        {formatTieredSuggestedStakeLine(bankroll, {
+                          daysToResolution: o.daysToResolution,
+                          currentPrice: o.currentPrice,
+                          layer: o.layer ?? "2",
+                          tieredStakeFraction: o.tieredStakeFraction,
+                          suggestedStakeTier: o.suggestedStakeTier
+                        })}
                       </td>
                       <td>
                         <ScoreDots psychologyScore={o.psychologyScore} />

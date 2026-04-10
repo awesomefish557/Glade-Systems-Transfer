@@ -11,6 +11,8 @@ import type { TradeMode } from "./types";
 
 const STORAGE = "seer-settings-v1";
 
+export type PreferredPlatform = "betfair" | "matchbook" | "smarkets";
+
 export type SeerSettings = {
   bankroll: number;
   minAerPercent: number;
@@ -18,15 +20,22 @@ export type SeerSettings = {
   defaultBetMode: TradeMode;
   notifyMorning: string;
   notifyAfternoon: string;
+  defaultStake: number;
+  preferredPlatform: PreferredPlatform;
+  /** When false, politics-style markets are hidden in opportunities (default). */
+  showPolitics: boolean;
 };
 
 export const defaultSeerSettings: SeerSettings = {
-  bankroll: 200,
-  minAerPercent: 5,
-  maxDays: 365,
+  bankroll: 1000,
+  minAerPercent: 15,
+  maxDays: 90,
   defaultBetMode: "paper",
   notifyMorning: "08:30",
-  notifyAfternoon: "16:45"
+  notifyAfternoon: "16:45",
+  defaultStake: 10,
+  preferredPlatform: "betfair",
+  showPolitics: false
 };
 
 function loadSettings(): SeerSettings {
@@ -35,7 +44,15 @@ function loadSettings(): SeerSettings {
     const raw = localStorage.getItem(STORAGE);
     if (!raw) return defaultSeerSettings;
     const o = JSON.parse(raw) as Partial<SeerSettings>;
-    return { ...defaultSeerSettings, ...o };
+    const merged = { ...defaultSeerSettings, ...o };
+    if (
+      merged.preferredPlatform !== "betfair" &&
+      merged.preferredPlatform !== "matchbook" &&
+      merged.preferredPlatform !== "smarkets"
+    ) {
+      merged.preferredPlatform = defaultSeerSettings.preferredPlatform;
+    }
+    return merged;
   } catch {
     return defaultSeerSettings;
   }

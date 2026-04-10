@@ -1,3 +1,40 @@
+import type { AerHoldWarning, SuggestedStakeTier } from "./types";
+
+export const POLITICS_LONG_DATED_RE =
+  /politic|election|senate|governor|congress|democrat|republican/i;
+
+const AER_HOLD_CAVEAT_MESSAGE = "Long hold reduces edge";
+
+/** Same thresholds as worker `aerHoldWarningFromDays` (UI fallback if API omits field). */
+export function aerHoldWarningFromDays(
+  daysToResolution: number
+): AerHoldWarning | undefined {
+  if (daysToResolution > 180) {
+    return { severity: "red", message: AER_HOLD_CAVEAT_MESSAGE };
+  }
+  if (daysToResolution > 90) {
+    return { severity: "amber", message: AER_HOLD_CAVEAT_MESSAGE };
+  }
+  return undefined;
+}
+
+export function resolveAerHoldWarning(o: {
+  daysToResolution: number;
+  aerHoldWarning?: AerHoldWarning;
+  aerWarning?: "amber" | "red";
+}): AerHoldWarning | undefined {
+  if (o.aerHoldWarning) return o.aerHoldWarning;
+  if (o.aerWarning === "amber" || o.aerWarning === "red") {
+    return { severity: o.aerWarning, message: AER_HOLD_CAVEAT_MESSAGE };
+  }
+  return aerHoldWarningFromDays(o.daysToResolution);
+}
+
+export function isPoliticsLikeMarket(category: string, question: string): boolean {
+  const blob = `${category} ${question}`;
+  return POLITICS_LONG_DATED_RE.test(blob);
+}
+
 /** UK tax year containing `reference` (UTC, 6 Apr → 5 Apr). */
 export function ukTaxYearBoundsUTC(reference: Date): { start: Date; end: Date } {
   const y = reference.getUTCFullYear();
@@ -25,6 +62,60 @@ export function formatGbp(x: number, decimals = 2): string {
   if (!Number.isFinite(x)) return "—";
   const sign = x < 0 ? "−" : "";
   return `${sign}£${Math.abs(x).toFixed(decimals)}`;
+}
+
+function parseLayerForTieredStake(layer: string | number): "1" | "2" | "3" {
+  const s = String(layer).replace(/^L/i, "").trim();
+  if (s === "1") return "1";
+  if (s === "3") return "3";
+  return "2";
+}
+
+/**
+ * Tiered stake fraction + tier (matches worker `getTieredSuggestedStake(1, …)`).
+ * Uses API fields when present; otherwise recomputes from layer / days / price.
+ */
+export function computeTieredStakeMeta(o: {
+  daysToResolution: number;
+  currentPrice: number;
+  layer: string | number;
+  tieredStakeFraction?: number;
+  suggestedStakeTier?: SuggestedStakeTier;
+}): { fraction: number; tier: SuggestedStakeTier } {
+  if (
+    typeof o.tieredStakeFraction === "number" &&
+    o.suggestedStakeTier !== undefined
+  ) {
+    return { fraction: o.tieredStakeFraction, tier: o.suggestedStakeTier };
+  }
+  const layer = parseLayerForTieredStake(o.layer);
+  const days = o.daysToResolution;
+  const price = o.currentPrice;
+  if (layer !== "1") return { fraction: 0.01, tier: 0 };
+  if (days <= 14 && price >= 0.97) return { fraction: 0.1, tier: 1 };
+  if (days <= 60 && price >= 0.95) return { fraction: 0.05, tier: 2 };
+  if (days <= 180 && price >= 0.9) return { fraction: 0.02, tier: 3 };
+  return { fraction: 0.005, tier: 4 };
+}
+
+/** One-line tiered stake for opportunities tables (scales with settings bankroll). */
+export function formatTieredSuggestedStakeLine(
+  bankroll: number,
+  o: {
+    daysToResolution: number;
+    currentPrice: number;
+    layer: string | number;
+    tieredStakeFraction?: number;
+    suggestedStakeTier?: SuggestedStakeTier;
+  }
+): string {
+  const { fraction, tier } = computeTieredStakeMeta(o);
+  const amount = Math.max(0, Math.round(bankroll * fraction));
+  return `${formatGbp(amount, 0)} — Tier ${tier}`;
+}
+
+export function tieredStakeClass(tier: SuggestedStakeTier): string {
+  return `tier-stake-line tier-stake--t${tier}`;
 }
 
 export function calcAnnualisedReturn(

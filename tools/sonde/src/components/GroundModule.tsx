@@ -49,6 +49,44 @@ export function GroundModule({ site }: { site: SiteLocation | null }) {
     data.bearing.rag === 'green' ? 'sonde-risk--low' : data.bearing.rag === 'amber' ? 'sonde-risk--med' : 'sonde-risk--high'
   const bearingBadge =
     data.bearing.rag === 'green' ? 'Good' : data.bearing.rag === 'amber' ? 'Moderate' : 'Poor'
+  const moveRagClass =
+    data.movementRag === 'blue'
+      ? 'sonde-risk--low'
+      : data.movementRag === 'green'
+        ? 'sonde-risk--low'
+        : data.movementRag === 'amber'
+          ? 'sonde-risk--med'
+          : 'sonde-risk--high'
+  const moveEmoji =
+    data.movementClassification === 'Uplift'
+      ? '🔵'
+      : data.movementClassification === 'Stable'
+        ? '🟢'
+        : data.movementClassification === 'Slow movement'
+          ? '🟡'
+          : '🔴'
+  const cum = data.movementCumulativeSeries ?? []
+  const chartW = 280
+  const chartH = 72
+  let chartPath = ''
+  let chartMin = 0
+  let chartMax = 1
+  if (cum.length > 1) {
+    const ys = cum.map((c) => c.cumulativeMm)
+    chartMin = Math.min(...ys)
+    chartMax = Math.max(...ys)
+    const pad = Math.max(1, (chartMax - chartMin) * 0.08)
+    const y0 = chartMin - pad
+    const y1 = chartMax + pad
+    const span = y1 - y0 || 1
+    chartPath = cum
+      .map((c, i) => {
+        const x = (i / (cum.length - 1)) * chartW
+        const y = chartH - ((c.cumulativeMm - y0) / span) * chartH
+        return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`
+      })
+      .join(' ')
+  }
   return (
     <div className="sonde-panel">
       <header className="sonde-panel-head">
@@ -86,14 +124,26 @@ export function GroundModule({ site }: { site: SiteLocation | null }) {
       </p>
 
       <h3 className="sonde-subhead">Ground movement (EGMS)</h3>
-      <div className="sonde-risk sonde-risk--med">
-        <span className="sonde-risk-val">
-          European Ground Motion Service
+      <div className={`sonde-risk ${moveRagClass}`} style={{ marginBottom: 12 }}>
+        <span className="sonde-risk-label">{moveEmoji} {data.movementClassification}</span>
+        <span className="sonde-risk-val" style={{ fontSize: '1.75rem', fontWeight: 700 }}>
+          {data.movementMeanMmYr != null ? `${data.movementMeanMmYr.toFixed(1)} mm/year` : '—'}
         </span>
         <span className="sonde-risk-meta">
-          Sentinel-1 satellite measures ground movement to mm precision across all of Europe, updated continuously.
+          Measured by Sentinel-1 (EGMS). Negative = subsidence, positive = uplift. Typical precision ~1–2 mm/yr; dense points near cities.
         </span>
       </div>
+      {cum.length > 1 ? (
+        <div style={{ marginBottom: 12 }}>
+          <p className="sonde-hint" style={{ marginBottom: 6 }}>
+            Cumulative displacement (linear model from mean velocity × observation window)
+          </p>
+          <svg width={chartW} height={chartH} style={{ display: 'block', maxWidth: '100%' }} aria-hidden>
+            <rect width={chartW} height={chartH} fill="rgba(0,0,0,0.2)" rx={4} />
+            <path d={chartPath} fill="none" stroke="var(--sonde-accent, #E8621A)" strokeWidth={2} />
+          </svg>
+        </div>
+      ) : null}
       <div className="sonde-map-tools-row" style={{ marginBottom: 8 }}>
         <a href={egmsUrl} target="_blank" rel="noreferrer" className="sonde-btn sonde-btn--primary">
           View ground movement at this site -&gt;
@@ -108,7 +158,13 @@ export function GroundModule({ site }: { site: SiteLocation | null }) {
       <ul className="sonde-flood-list">
         <li><span className="sonde-flood-title">Mean velocity</span><span className="sonde-flood-sub">{data.movementMeanMmYr != null ? `${data.movementMeanMmYr.toFixed(2)} mm/year` : 'Unavailable'}</span></li>
         <li><span className="sonde-flood-title">Seasonal amplitude</span><span className="sonde-flood-sub">{data.seasonalAmplitudeMm != null ? `${data.seasonalAmplitudeMm.toFixed(2)} mm` : 'Unavailable'}</span></li>
-        <li><span className="sonde-flood-title">Measurement points</span><span className="sonde-flood-sub">{data.movementPoints || 0}</span></li>
+        <li>
+          <span className="sonde-flood-title">Measurement points</span>
+          <span className="sonde-flood-sub">
+            {data.movementPoints || 0}
+            {data.movementPoints ? ' within ~500 m' : ''}
+          </span>
+        </li>
         <li><span className="sonde-flood-title">Measurement map</span><span className="sonde-flood-sub"><a href={egmsUrl} target="_blank" rel="noreferrer">Open EGMS map at site</a></span></li>
       </ul>
       <p className="sonde-hint">

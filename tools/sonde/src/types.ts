@@ -85,7 +85,15 @@ export interface OSMBuilding {
   rings: [number, number][][]
   levels?: number
   heightM?: number
+  /** Plain `name=*` from OSM (may be "yes" on some imports — prefer `buildingName`). */
   name?: string
+  /** `building:name=*` */
+  buildingName?: string
+  /** `addr:housenumber=*` */
+  addrHousenumber?: string
+  /** `addr:street=*` */
+  addrStreet?: string
+  /** `building=*` (often `yes`) */
   buildingType?: string
   roofShape?: string
 }
@@ -93,6 +101,16 @@ export interface OSMBuilding {
 export interface OSMRoad {
   coords: [number, number][]
   highway: string
+  /** OSM `surface=*` when present */
+  surface?: string
+  /** Parsed numeric width in metres when `width=*` or `est_width` style tag present */
+  widthM?: number
+}
+
+export interface OSMRailway {
+  coords: [number, number][]
+  /** OSM `railway=*` value */
+  railway: string
 }
 
 export interface OSMTree {
@@ -114,6 +132,7 @@ export interface OSMWoodland {
 export interface OSMPlanData {
   buildings: OSMBuilding[]
   roads: OSMRoad[]
+  railways: OSMRailway[]
   trees: OSMTree[]
   woodlands: OSMWoodland[]
 }
@@ -237,6 +256,12 @@ export interface GroundMovementSeriesPoint {
   displacementMm: number
 }
 
+/** Synthetic cumulative displacement vs time when EGMS does not return a full series. */
+export interface GroundMovementCumulativePoint {
+  date: string
+  cumulativeMm: number
+}
+
 export interface GroundData {
   dtmAodM?: number
   dsmAodM?: number
@@ -253,12 +278,13 @@ export interface GroundData {
   bearing: GroundBearingEstimate
   boreholes: GroundBorehole[]
   movementMeanMmYr?: number
-  movementClassification: 'Stable' | 'Slow movement' | 'Active movement'
-  movementRag: 'green' | 'amber' | 'red'
+  movementClassification: 'Stable' | 'Slow movement' | 'Active movement' | 'Uplift'
+  movementRag: 'green' | 'amber' | 'red' | 'blue'
   seasonalAmplitudeMm?: number
   movementPoints: number
   movementDateRange?: string
   movementSeries: GroundMovementSeriesPoint[]
+  movementCumulativeSeries?: GroundMovementCumulativePoint[]
   designImplications: string[]
 }
 

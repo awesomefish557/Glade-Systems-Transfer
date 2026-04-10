@@ -127,7 +127,7 @@ export default function PortfolioDashboard() {
             hmrcAnnualProfit={stats?.hmrcAnnualProfit ?? 0}
             thresholdWarning={stats?.threshold1000Warning ?? false}
           />
-          <Portfolio open={portfolio.open} resolved={resolved} />
+          <Portfolio open={portfolio.open} resolved={resolved} stats={stats} />
         </>
       )}
     </div>

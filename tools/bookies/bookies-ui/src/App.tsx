@@ -23,6 +23,8 @@ type BookieRow = {
   joined_at?: string;
   last_activity?: string;
   onboarding_stage?: number;
+  queue_stage?: number;
+  stage_updated_at?: string;
 };
 
 type BetRow = {
@@ -1104,6 +1106,10 @@ export default function App() {
           <QueueTab
             bookies={bookies}
             getTierMeta={bookieTierMeta}
+            onPatchStage={async (id, stage) => {
+              await apiJson(`/api/bookies/${id}/stage`, { method: "PATCH", body: JSON.stringify({ stage }) });
+              await refreshBookies();
+            }}
             onPatchBookie={async (id, patch) => {
               await apiJson(`/api/bookies/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
               setEditingBookie((e) => {

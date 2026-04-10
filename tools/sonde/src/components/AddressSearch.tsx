@@ -1,4 +1,3 @@
-import type { Map as MapboxMap } from 'mapbox-gl'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { SiteLocation } from '../types'
 
@@ -11,11 +10,9 @@ type Feature = {
 }
 
 export function AddressSearch({
-  map,
   onSite,
   syncAddress,
 }: {
-  map: MapboxMap | null
   onSite: (s: SiteLocation) => void
   /** When site is set from URL/share, mirror into the search field */
   syncAddress?: string | null
@@ -86,11 +83,8 @@ export function AddressSearch({
       onSite(site)
       setQ(f.place_name)
       setOpen(false)
-      if (map) {
-        map.flyTo({ center: [lng, lat], zoom: 16, essential: true })
-      }
     },
-    [map, onSite]
+    [onSite]
   )
 
   const useMyLocation = useCallback(() => {
@@ -103,6 +97,10 @@ export function AddressSearch({
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
         const { latitude: lat, longitude: lng } = pos.coords
+        if (!Number.isFinite(lat) || !Number.isFinite(lng) || (lat === 0 && lng === 0)) {
+          setLoading(false)
+          return
+        }
         try {
           const url = new URL(
             `https://api.mapbox.com/geocoding/v5/mapbox.places/${lng},${lat}.json`
@@ -123,7 +121,6 @@ export function AddressSearch({
             }
             onSite(site)
             setQ(site.address)
-            map?.flyTo({ center: [lng, lat], zoom: 16, essential: true })
           }
         } catch {
           alert('Reverse geocode failed.')
@@ -137,7 +134,7 @@ export function AddressSearch({
       },
       { enableHighAccuracy: true, timeout: 12_000 }
     )
-  }, [token, map, onSite, pick])
+  }, [token, onSite, pick])
 
   if (!token) {
     return (

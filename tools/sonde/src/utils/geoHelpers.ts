@@ -1,4 +1,4 @@
-const M_PER_DEG_LAT = 111_320
+export const M_PER_DEG_LAT = 111_320
 
 export function metersPerDegreeLng(latDeg: number): number {
   return M_PER_DEG_LAT * Math.cos((latDeg * Math.PI) / 180)

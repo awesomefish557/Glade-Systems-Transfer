@@ -1,85 +1,160 @@
+/**
+ * Pages Function for `/proxy` — mirrored in `public/_worker.js` (advanced mode).
+ * Kept for `wrangler pages dev` / future non-advanced deployments.
+ */
+
 const ALLOWED_DOMAINS = [
+  'environment.data.gov.uk',
   'api.bgs.ac.uk',
   'egms.land.copernicus.eu',
   'epc.opendatacommunities.org',
-  'api.erg.ic.ac.uk',
-  'uk-air.defra.gov.uk',
   'api.uk-air.defra.gov.uk',
-  'environment.data.gov.uk',
+  'uk-air.defra.gov.uk',
   'climate-api.open-meteo.com',
   'archive-api.open-meteo.com',
+  'api.open-meteo.com',
   'overpass-api.de',
-  'overpass.gladesystems.uk',
   'overpass.kumi.systems',
   'maps.mail.ru',
-  '178.104.106.123',
   'lle.gov.wales',
   'datamap.gov.wales',
   'coflein.gov.uk',
+  'api.beta.ons.gov.uk',
+  'portal.opentopography.org',
+  'dataspace.copernicus.eu',
+  'planning.data.gov.uk',
+  'flood-monitoring.data.gov.uk',
+  /** Previously allowlisted — keep for existing integrations */
+  'remotesensingdata.gov.scot',
+  'api.erg.ic.ac.uk',
+  'overpass.gladesystems.uk',
+  '178.104.106.123',
+  'data.gov.ie',
+  'opengeodata.nrw.de',
 ]
 
-function corsHeaders(origin: string | null): HeadersInit {
+function corsJson(): HeadersInit {
   return {
-    'Access-Control-Allow-Origin': origin ?? '*',
+    'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Access-Control-Max-Age': '86400',
-    Vary: 'Origin',
   }
 }
 
-function isAllowedHost(hostname: string): boolean {
-  return ALLOWED_DOMAINS.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`))
+function isAllowedDomain(targetHost: string): boolean {
+  return ALLOWED_DOMAINS.some(
+    (domain) =>
+      targetHost === domain ||
+      targetHost.endsWith('.' + domain) ||
+      /** Listed entry is a subdomain of the requested host (edge cases, e.g. regional mirrors) */
+      domain.endsWith('.' + targetHost)
+  )
 }
 
-export async function onRequest(context: any) {
-  const req = context.request as Request
-  const incoming = new URL(req.url)
-  const target = incoming.searchParams.get('url')
-  const origin = req.headers.get('Origin')
+function jsonError(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...corsJson() },
+  })
+}
+
+export async function onRequest(context: { request: Request }) {
+  const req = context.request
+  const url = new URL(req.url)
+  const target = url.searchParams.get('url')
+
+  console.log('Proxy request:', {
+    method: req.method,
+    targetPreview: target?.slice(0, 120),
+    origin: req.headers.get('Origin'),
+  })
 
   if (req.method === 'OPTIONS') {
-    return new Response(null, { status: 204, headers: corsHeaders(origin) })
+    return new Response(null, { status: 204, headers: corsJson() })
   }
 
   if (!target) {
-    return new Response('Missing url parameter', { status: 400, headers: corsHeaders(origin) })
+    return jsonError(400, { error: { code: 400, message: 'Missing url' } })
   }
 
+  const trimmed = target.trim()
   let targetUrl: URL
   try {
-    targetUrl = new URL(target)
+    targetUrl = new URL(trimmed)
   } catch {
-    return new Response('Invalid url parameter', { status: 400, headers: corsHeaders(origin) })
+    try {
+      targetUrl = new URL(decodeURIComponent(trimmed))
+    } catch {
+      console.log('Proxy: URL parse failed for param (trimmed length)', trimmed.length)
+      return jsonError(400, { error: { code: 400, message: 'Invalid URL' } })
+    }
   }
 
-  if (!isAllowedHost(targetUrl.hostname)) {
-    return new Response('Domain not allowed', { status: 403, headers: corsHeaders(origin) })
+  console.log('Proxy target URL:', targetUrl.toString())
+  const targetHost = targetUrl.hostname
+  console.log('Parsed hostname:', targetHost)
+  console.log(
+    'Allowed check:',
+    ALLOWED_DOMAINS.some(
+      (d) => targetHost === d || targetHost.endsWith('.' + d) || d.endsWith('.' + targetHost)
+    )
+  )
+
+  if (targetUrl.protocol !== 'http:' && targetUrl.protocol !== 'https:') {
+    return jsonError(400, { error: { code: 400, message: 'Invalid URL scheme' } })
   }
 
-  const outgoingHeaders = new Headers()
-  outgoingHeaders.set('Accept', req.headers.get('Accept') ?? '*/*')
-  outgoingHeaders.set('User-Agent', 'Sonde/1.0')
+  if (!isAllowedDomain(targetHost)) {
+    console.log('BLOCKED:', targetHost, 'not in allowed list')
+    return jsonError(403, {
+      error: { code: 403, message: 'Domain not allowed', domain: targetHost },
+    })
+  }
 
-  const auth = req.headers.get('Authorization')
-  if (auth) outgoingHeaders.set('Authorization', auth)
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 30_000)
 
-  const contentType = req.headers.get('Content-Type')
-  if (contentType) outgoingHeaders.set('Content-Type', contentType)
+  try {
+    const method = req.method === 'POST' ? 'POST' : 'GET'
+    const outgoingHeaders: Record<string, string> = {
+      Accept: 'application/json, image/tiff, */*',
+      'User-Agent': 'Sonde/1.0 (gladesystems.uk)',
+    }
+    const auth = req.headers.get('Authorization')
+    if (auth) outgoingHeaders.Authorization = auth
+    if (method === 'POST') {
+      outgoingHeaders['Content-Type'] = req.headers.get('Content-Type') || 'application/json'
+    }
 
-  const hasBody = !['GET', 'HEAD'].includes(req.method.toUpperCase())
-  const upstream = await fetch(targetUrl.toString(), {
-    method: req.method,
-    headers: outgoingHeaders,
-    body: hasBody ? req.body : undefined,
-  })
+    const body = method === 'POST' ? await req.text() : undefined
 
-  const responseHeaders = new Headers(corsHeaders(origin))
-  responseHeaders.set('Cache-Control', 'public, max-age=3600')
-  responseHeaders.set('Content-Type', upstream.headers.get('Content-Type') ?? 'application/json')
+    const response = await fetch(targetUrl.toString(), {
+      method,
+      headers: outgoingHeaders,
+      body,
+      signal: controller.signal,
+    })
 
-  return new Response(upstream.body, {
-    status: upstream.status,
-    headers: responseHeaders,
-  })
+    clearTimeout(timeout)
+
+    const buf = await response.arrayBuffer()
+
+    return new Response(buf, {
+      status: response.status,
+      headers: {
+        'Content-Type': response.headers.get('Content-Type') || 'application/json',
+        ...corsJson(),
+        'Cache-Control': 'public, max-age=3600',
+        'X-Proxied-From': targetUrl.toString(),
+      },
+    })
+  } catch (err: unknown) {
+    clearTimeout(timeout)
+    const message = err instanceof Error ? err.message : 'Upstream fetch failed'
+    return new Response(JSON.stringify({ error: message, target: targetUrl.toString() }), {
+      status: 502,
+      headers: { 'Content-Type': 'application/json', ...corsJson() },
+    })
+  }
 }

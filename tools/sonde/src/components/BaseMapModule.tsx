@@ -87,23 +87,11 @@ export function BaseMapModule({
   site,
   radiusM,
   onRadius,
-  historicalYear,
-  onHistoricalYear,
-  historicalOpacity,
-  onHistoricalOpacity,
-  historicalEnabled,
-  onHistoricalEnabled,
   state,
 }: {
   site: SiteLocation | null
   radiusM: number
   onRadius: (m: number) => void
-  historicalYear: '1890' | '1950' | 'modern'
-  onHistoricalYear: (y: '1890' | '1950' | 'modern') => void
-  historicalOpacity: number
-  onHistoricalOpacity: (n: number) => void
-  historicalEnabled: boolean
-  onHistoricalEnabled: (v: boolean) => void
   state: { status: string; data?: OSMPlanData; message?: string }
 }) {
   const [showLandUse, setShowLandUse] = useState(false)
@@ -318,58 +306,9 @@ export function BaseMapModule({
         <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => setShowBuildingAges((v) => !v)}>
           {showBuildingAges ? 'Building ages: ON' : 'Building ages: OFF'}
         </button>
-        <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => onHistoricalEnabled(!historicalEnabled)}>
-          {historicalEnabled ? 'History: ON' : 'History: OFF'}
-        </button>
-        <div className="sonde-map-tools-row">
-          <button
-            type="button"
-            className={`sonde-btn ${historicalEnabled && historicalYear === '1890' ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
-            onClick={() => {
-              onHistoricalEnabled(true)
-              onHistoricalYear('1890')
-            }}
-          >
-            1890s
-          </button>
-          <button
-            type="button"
-            className={`sonde-btn ${historicalEnabled && historicalYear === '1950' ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
-            onClick={() => {
-              onHistoricalEnabled(true)
-              onHistoricalYear('1950')
-            }}
-          >
-            1950s
-          </button>
-          <button
-            type="button"
-            className={`sonde-btn ${!historicalEnabled || historicalYear === 'modern' ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
-            onClick={() => {
-              onHistoricalYear('modern')
-              onHistoricalEnabled(false)
-            }}
-          >
-            Modern
-          </button>
-        </div>
-        <label className="sonde-label">
-          Opacity
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={Math.round(historicalOpacity * 100)}
-            disabled={!historicalEnabled}
-            onChange={(e) => onHistoricalOpacity(Number(e.target.value) / 100)}
-          />
-          <span className="sonde-mono">{Math.round(historicalOpacity * 100)}%</span>
-        </label>
-        {historicalEnabled ? (
-          <p className="sonde-hint">
-            Viewing {historicalYear === '1890' ? '1890s' : '1950s'} OS map · National Library of Scotland
-          </p>
-        ) : null}
+        <p className="sonde-hint">
+          Historical map overlay is controlled from the map ⚙ panel (1890s / 1950s / opacity).
+        </p>
         <label className="sonde-btn sonde-btn--ghost" style={{ cursor: 'pointer' }}>
           GeoJSON import
           <input

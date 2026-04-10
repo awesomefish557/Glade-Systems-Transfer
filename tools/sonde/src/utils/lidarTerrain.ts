@@ -1,6 +1,7 @@
 /**
- * EA LiDAR composite (England & Wales) — ImageServer export + Open-Meteo / section helpers.
+ * EA LiDAR composite (England & Wales) — WMS GetMap GeoTIFF + Open-Meteo / section helpers.
  */
+import type { Map as MapboxMap } from 'mapbox-gl'
 import { fromArrayBuffer } from 'geotiff'
 import { offsetLatMeters, offsetLngMeters } from './geoHelpers'
 import { proxied } from './proxy'
@@ -13,10 +14,18 @@ export type LidarElevationGrid = {
   bbox: [number, number, number, number]
 }
 
-export const EA_LIDAR_DTM_EXPORT =
-  'https://environment.data.gov.uk/arcgis/rest/services/EA/LidarComposite_DTM_2022/ImageServer/exportImage'
-export const EA_LIDAR_DSM_EXPORT =
-  'https://environment.data.gov.uk/arcgis/rest/services/EA/LidarComposite_DSM_2022/ImageServer/exportImage'
+export const WMS_DTM =
+  'https://environment.data.gov.uk/spatialdata/lidar-composite-digital-terrain-model-dtm-1m-2022/wms'
+export const WMS_DSM =
+  'https://environment.data.gov.uk/spatialdata/lidar-composite-digital-surface-model-last-return-dsm-1m-2022/wms'
+
+/**
+ * WMS `LAYERS` must match a `<Layer><Name>` from GetCapabilities for this spatialdata endpoint.
+ * Using `dataset-{uuid}` (metadata id) as LAYERS returns LayerNotDefined from the server.
+ * These elevation layers return single-band GeoTIFF suitable for `parseEaLidarTiff`.
+ */
+const WMS_LAYERS_DTM = 'Lidar_Composite_Elevation_DTM_1m'
+const WMS_LAYERS_DSM = 'Lidar_Composite_Elevation_LZ_DSM_1m'
 
 export const LIDAR_CACHE_MS = 30 * 24 * 60 * 60 * 1000
 
@@ -103,41 +112,62 @@ export function saveCachedTiff(cacheKey: string, buffer: ArrayBuffer): void {
   }
 }
 
-export async function fetchEaLidarTiff(
-  baseUrl: string,
-  bbox: [number, number, number, number],
-  signal?: AbortSignal,
-  logKind: 'dtm' | 'dsm' = 'dtm'
+/**
+ * EA LiDAR WMS GetMap (1 m DTM/DSM 2022). WMS 1.3.0 + EPSG:4326 uses axis order
+ * miny,minx,maxy,maxx → south,west,north,east.
+ */
+export async function fetchEaLidarWms(
+  type: 'dtm' | 'dsm',
+  west: number,
+  south: number,
+  east: number,
+  north: number,
+  signal?: AbortSignal
 ): Promise<ArrayBuffer> {
-  const [west, south, east, north] = bbox
-  const u = new URL(baseUrl)
-  u.searchParams.set('bbox', `${west},${south},${east},${north}`)
-  u.searchParams.set('bboxSR', '4326')
-  u.searchParams.set('size', '256,256')
-  u.searchParams.set('format', 'tiff')
-  u.searchParams.set('f', 'image')
-  const absoluteUrl = u.toString()
-  const fetchUrl = proxied(absoluteUrl, 'always')
-  if (logKind === 'dtm') {
-    console.log('LiDAR: fetching DTM tile...')
-  } else {
-    console.log('LiDAR: fetching DSM tile...')
+  const baseWms = type === 'dtm' ? WMS_DTM : WMS_DSM
+  const layers = type === 'dtm' ? WMS_LAYERS_DTM : WMS_LAYERS_DSM
+  const params =
+    '?SERVICE=WMS' +
+    '&VERSION=1.3.0' +
+    '&REQUEST=GetMap' +
+    '&LAYERS=' +
+    layers +
+    '&STYLES=' +
+    '&CRS=EPSG:4326' +
+    '&BBOX=' +
+    south +
+    ',' +
+    west +
+    ',' +
+    north +
+    ',' +
+    east +
+    '&WIDTH=256' +
+    '&HEIGHT=256' +
+    '&FORMAT=image/geotiff'
+
+  const targetUrl = baseWms + params
+  console.log('LiDAR WMS URL:', targetUrl)
+
+  const response = await fetch(proxied(targetUrl, 'always'), { signal })
+  const buf = await response.arrayBuffer()
+  const ct = (response.headers.get('content-type') ?? '').toLowerCase()
+  console.log('WMS status:', response.status)
+  console.log('WMS content-type:', ct)
+
+  if (!response.ok) {
+    const text = new TextDecoder().decode(new Uint8Array(buf).slice(0, 400))
+    console.error('WMS error:', text)
+    throw new Error(`WMS ${type} ${response.status}`)
   }
-  try {
-    const response = await fetch(fetchUrl, { signal })
-    const tag = logKind === 'dtm' ? 'DTM' : 'DSM'
-    console.log(`LiDAR ${tag} response status:`, response.status)
-    console.log(`LiDAR ${tag} response type:`, response.headers.get('content-type'))
-    if (!response.ok) {
-      const err = new Error(`LiDAR exportImage ${response.status}`)
-      console.error('LiDAR fetch failed:', err)
-      throw err
-    }
-    return response.arrayBuffer()
-  } catch (err) {
-    console.error('LiDAR fetch failed:', err)
-    throw err
+
+  if (ct.includes('xml') || (ct.includes('text/') && !ct.includes('tiff'))) {
+    const text = new TextDecoder().decode(new Uint8Array(buf).slice(0, 400))
+    console.error('WMS service exception:', text)
+    throw new Error(`WMS ${type} returned ${ct.trim()}`)
   }
+
+  return buf
 }
 
 export async function parseEaLidarTiff(buffer: ArrayBuffer): Promise<LidarElevationGrid> {
@@ -189,7 +219,7 @@ export async function sampleOpenMeteoElevations(
     const chunk = points.slice(i, i + chunkSize)
     const lats = chunk.map((p) => p.lat.toFixed(6)).join(',')
     const lngs = chunk.map((p) => p.lng.toFixed(6)).join(',')
-    const res = await fetch(`https://api.open-meteo.com/v1/elevation?latitude=${lats}&longitude=${lngs}`)
+    const res = await fetch(proxied(`https://api.open-meteo.com/v1/elevation?latitude=${lats}&longitude=${lngs}`))
     if (!res.ok) throw new Error(`Open-Meteo ${res.status}`)
     const data = (await res.json()) as { elevation?: number[] }
     const part = data.elevation ?? []
@@ -198,7 +228,28 @@ export async function sampleOpenMeteoElevations(
     }
     out.push(...part)
   }
-  return out
+  const elevations = out
+  console.log('Open-Meteo response:', elevations)
+  return elevations
+}
+
+/** Sample Mapbox raster-dem terrain (requires `mapbox-dem` source + setTerrain). Last-resort for section profile. */
+export function sampleMapboxTerrainElevations(
+  map: MapboxMap,
+  points: Array<{ lat: number; lng: number }>
+): number[] | null {
+  if (!map.isStyleLoaded() || !map.getTerrain()) return null
+  try {
+    const out: number[] = []
+    for (const p of points) {
+      const z = map.queryTerrainElevation([p.lng, p.lat])
+      if (z == null || !Number.isFinite(z)) return null
+      out.push(z)
+    }
+    return out
+  } catch {
+    return null
+  }
 }
 
 export function sectionElevationsFromLidar(
@@ -658,11 +709,6 @@ export function contoursLocalMFromGrid(
   return out
 }
 
-/** Copernicus GLO-30 / EU DEM footprint (approximate). */
-export function isEuropeCop30Coverage(lat: number, lng: number): boolean {
-  return lat >= 27 && lat <= 72 && lng >= -35 && lng <= 45
-}
-
 /** Indicative Scotland — for coverage messaging only (national LiDAR portals). */
 export function isScotlandRough(lat: number, lng: number): boolean {
   return lat >= 54.5 && lat <= 60.9 && lng >= -8.2 && lng <= -0.4
@@ -675,70 +721,6 @@ export function terrainCellSizeMetersApprox(grid: LidarElevationGrid, refLat: nu
   const dxM = ((east - west) / w) * 111_320 * Math.cos((refLat * Math.PI) / 180)
   const dyM = ((north - south) / h) * 111_320
   return Math.max(dxM, dyM)
-}
-
-const OPEN_TOPO_GLOBALDEM = 'https://portal.opentopography.org/API/globaldem'
-
-export function openTopoApiKey(): string {
-  return (import.meta.env.VITE_OPENTOPOGRAPHY_API_KEY ?? 'demoapikeyot2022').trim()
-}
-
-export function chooseOpenTopoDemType(lat: number, lng: number): 'COP30' | 'SRTMGL1' {
-  return isEuropeCop30Coverage(lat, lng) ? 'COP30' : 'SRTMGL1'
-}
-
-export async function fetchOpenTopoGlobaldemTiff(
-  demtype: 'COP30' | 'SRTMGL1',
-  west: number,
-  south: number,
-  east: number,
-  north: number,
-  signal?: AbortSignal
-): Promise<ArrayBuffer> {
-  const u = new URL(OPEN_TOPO_GLOBALDEM)
-  u.searchParams.set('demtype', demtype)
-  u.searchParams.set('south', String(south))
-  u.searchParams.set('north', String(north))
-  u.searchParams.set('west', String(west))
-  u.searchParams.set('east', String(east))
-  u.searchParams.set('outputFormat', 'GTiff')
-  u.searchParams.set('API_Key', openTopoApiKey())
-  const res = await fetch(proxied(u.toString(), 'always'), { signal })
-  if (!res.ok) throw new Error(`OpenTopography ${demtype} ${res.status}`)
-  return res.arrayBuffer()
-}
-
-export function openTopoCacheKey(
-  demtype: string,
-  west: number,
-  south: number,
-  east: number,
-  north: number
-): string {
-  const r = (n: number) => n.toFixed(4)
-  return `sonde_ot_${demtype}_${r(west)}_${r(south)}_${r(east)}_${r(north)}`
-}
-
-/** One-shot DEM around a polyline for section / fallback sampling. */
-export async function fetchDemGridForBounds(
-  south: number,
-  north: number,
-  west: number,
-  east: number,
-  signal?: AbortSignal
-): Promise<LidarElevationGrid | null> {
-  const midLat = (south + north) / 2
-  const midLng = (west + east) / 2
-  const demtype = chooseOpenTopoDemType(midLat, midLng)
-  const key = openTopoCacheKey(demtype, west, south, east, north)
-  try {
-    const cached = await loadCachedTiff(key)
-    const buf = cached ?? (await fetchOpenTopoGlobaldemTiff(demtype, west, south, east, north, signal))
-    if (!cached) saveCachedTiff(key, buf)
-    return await parseEaLidarTiff(buf)
-  } catch {
-    return null
-  }
 }
 
 function haversineM(aLat: number, aLng: number, bLat: number, bLng: number): number {
@@ -881,6 +863,5 @@ export function slopeGeoJsonFromGrid(
 export function terrainCoverageSummary(lat: number, lng: number): string {
   if (isEwLidarCoverage(lat, lng)) return 'LiDAR 1m ✓ England/Wales'
   if (isScotlandRough(lat, lng)) return 'LiDAR 0.5m — use Scotland national portal'
-  if (isEuropeCop30Coverage(lat, lng)) return 'EU DEM 25m ✓ Europe'
-  return 'SRTM 30m ✓ Global'
+  return 'Open-Meteo / Mapbox terrain (no tile DEM)'
 }

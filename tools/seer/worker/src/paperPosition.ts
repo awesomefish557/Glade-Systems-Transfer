@@ -1,4 +1,5 @@
 import {
+  hasOpenPositionForMarketAndDirection,
   insertOpenPosition,
   insertShadowExchangeMarketIfMissing,
   type Env
@@ -241,6 +242,21 @@ export async function openPaperPositionWithVenuePricing(
   const signalsJson = isExchangePaper
     ? "[]"
     : JSON.stringify(Array.isArray(body.signals) ? body.signals : []);
+
+  if (
+    await hasOpenPositionForMarketAndDirection(
+      env.DB,
+      String(body.marketId),
+      direction
+    )
+  ) {
+    return {
+      ok: false,
+      error: "duplicate_position",
+      message:
+        "Already have an open position on this market in this direction"
+    };
+  }
 
   try {
     if (isExchangePaper) {

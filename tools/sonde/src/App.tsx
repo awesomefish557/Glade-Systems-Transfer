@@ -34,25 +34,21 @@ import { usePlanningData } from './hooks/usePlanningData'
 import { useSolarData } from './hooks/useSolarData'
 import { useWindData } from './hooks/useWindData'
 import { getOverpassSourceStatus, subscribeOverpassSource } from './utils/overpass'
+import { proxied } from './utils/proxy'
 import { azimuthSouthToNorthDeg } from './utils/sunCalc'
 import { fetchEgmsPointsFeatureCollection } from './utils/egms'
 import {
-  EA_LIDAR_DSM_EXPORT,
-  EA_LIDAR_DTM_EXPORT,
   extractLidarTrees,
-  fetchEaLidarTiff,
-  fetchDemGridForBounds,
-  fetchOpenTopoGlobaldemTiff,
-  isEuropeCop30Coverage,
+  fetchEaLidarWms,
   isEwLidarCoverage,
   logLidarCoverageCheck,
   LIDAR_CACHE_MS,
   lidarTileCacheKey,
   loadCachedTiff,
   metricsFromLidarGrids,
-  openTopoCacheKey,
   parseEaLidarTiff,
   saveCachedTiff,
+  sampleMapboxTerrainElevations,
   sampleOpenMeteoElevations,
   sectionElevationsFromLidar,
   siteToTileZ14,
@@ -62,7 +58,7 @@ import {
   tileBoundsWgs84,
   type LidarElevationGrid,
 } from './utils/lidarTerrain'
-import type { ModuleId, OSMTree, SavedSite, SiteLocation, StatusTone } from './types'
+import type { ModuleId, OSMBuilding, OSMTree, SavedSite, SiteLocation, StatusTone } from './types'
 
 const MODULES: { id: ModuleId; label: string }[] = [
   { id: 'solar', label: 'Solar' },
@@ -119,6 +115,106 @@ const DEFAULT_SITE: SiteLocation = {
   lng: -2.5,
   name: '',
   address: '',
+}
+
+/** Avoid `Number(null) === 0` falsely using zoom 0 (world view). */
+function readUrlZoomParam(): number | null {
+  const raw = new URLSearchParams(window.location.search).get('zoom')
+  if (raw === null || raw === '') return null
+  const z = Number(raw)
+  if (!Number.isFinite(z) || z < 3 || z > 22) return null
+  return z
+}
+
+function flyMapToSite(map: mapboxgl.Map, s: SiteLocation | null) {
+  if (!s || (s.lat === 0 && s.lng === 0)) {
+    map.flyTo({ center: UK_CENTER, zoom: UK_ZOOM, pitch: 0, bearing: 0, essential: true, duration: 1200 })
+    return
+  }
+  const urlZ = readUrlZoomParam()
+  map.flyTo({
+    center: [s.lng, s.lat],
+    zoom: urlZ ?? 16,
+    pitch: 45,
+    bearing: 0,
+    duration: 1500,
+    essential: true,
+  })
+}
+
+function safeAddLayer(map: mapboxgl.Map, layer: mapboxgl.AnyLayer) {
+  const run = () => {
+    try {
+      if (!map.getStyle()) return
+      if (map.getLayer(layer.id)) return
+      map.addLayer(layer)
+    } catch (e) {
+      console.warn('safeAddLayer:', layer.id, e)
+    }
+  }
+  if (map.isStyleLoaded()) run()
+  else map.once('style.load', run)
+}
+
+type MapboxSourceArg = Parameters<mapboxgl.Map['addSource']>[1]
+
+function safeAddSource(map: mapboxgl.Map, id: string, source: MapboxSourceArg) {
+  const run = () => {
+    try {
+      if (!map.getStyle()) return
+      if (map.getSource(id)) return
+      map.addSource(id, source)
+    } catch (e) {
+      console.warn('safeAddSource:', id, e)
+    }
+  }
+  if (map.isStyleLoaded()) run()
+  else map.once('style.load', run)
+}
+
+function safeSetGeoJsonData(map: mapboxgl.Map, sourceId: string, data: GeoJSON.FeatureCollection): void {
+  const source = map.getSource(sourceId)
+  if (source && 'setData' in source) {
+    ;(source as mapboxgl.GeoJSONSource).setData(data)
+  }
+}
+
+const BUILDING_TYPE_SECTION_LABELS: Record<string, string> = {
+  residential: 'House',
+  retail: 'Shop',
+  supermarket: 'Supermarket',
+  university: 'University',
+  school: 'School',
+  church: 'Church',
+}
+
+function isUselessOsmNameValue(s: string | undefined): boolean {
+  if (s === undefined) return true
+  const t = s.trim().toLowerCase()
+  return t === '' || t === 'yes' || t === 'true' || t === '1'
+}
+
+/** Section strip label: building:name → name (not "yes") → addr → building type map → Building */
+function formatBuildingSectionLabel(bld: OSMBuilding): string {
+  const buildingName = (bld.buildingName ?? '').trim()
+  if (buildingName) return buildingName
+
+  const plainName = (bld.name ?? '').trim()
+  if (plainName && !isUselessOsmNameValue(plainName)) return plainName
+
+  const hn = (bld.addrHousenumber ?? '').trim()
+  const st = (bld.addrStreet ?? '').trim()
+  const addr = [hn, st].filter(Boolean).join(' ')
+  if (addr) return addr
+
+  const raw = (bld.buildingType ?? '').trim().toLowerCase()
+  if (raw && !isUselessOsmNameValue(raw)) {
+    const mapped = BUILDING_TYPE_SECTION_LABELS[raw]
+    if (mapped) return mapped
+    return 'Building'
+  }
+
+  return 'Building'
 }
 
 function clamp(n: number, min: number, max: number): number {
@@ -252,7 +348,10 @@ async function fetchDefraLidarHeightM(lat: number, lng: number): Promise<number 
     dtmUrl.searchParams.set('geometryType', 'esriGeometryPoint')
     dtmUrl.searchParams.set('returnGeometry', 'false')
     dtmUrl.searchParams.set('f', 'json')
-    const [dsmRes, dtmRes] = await Promise.all([fetch(dsmUrl.toString()), fetch(dtmUrl.toString())])
+    const [dsmRes, dtmRes] = await Promise.all([
+      fetch(proxied(dsmUrl.toString())),
+      fetch(proxied(dtmUrl.toString())),
+    ])
     if (!dsmRes.ok || !dtmRes.ok) return null
     const dsm = parseArcgisValue(await dsmRes.json())
     const dtm = parseArcgisValue(await dtmRes.json())
@@ -453,7 +552,7 @@ export default function App() {
   const [lidarDtmGrid, setLidarDtmGrid] = useState<LidarElevationGrid | null>(null)
   const [lidarDsmGrid, setLidarDsmGrid] = useState<LidarElevationGrid | null>(null)
   const [lidarEwLabel, setLidarEwLabel] = useState<'idle' | 'loading' | 'covered' | 'outside' | 'error'>('idle')
-  const [terrainDemSource, setTerrainDemSource] = useState<'none' | 'ea_1m' | 'eu_25m' | 'srtm_30m'>('none')
+  const [terrainDemSource, setTerrainDemSource] = useState<'none' | 'ea_1m'>('none')
   const [egmsHeatmapOn, setEgmsHeatmapOn] = useState(false)
   const [slopeOverlayOn, setSlopeOverlayOn] = useState(false)
   const [lidarProgressDetail, setLidarProgressDetail] = useState('')
@@ -468,10 +567,10 @@ export default function App() {
   const [historicalEnabled, setHistoricalEnabled] = useState(false)
   const [historicalYear, setHistoricalYear] = useState<'1890' | '1950' | 'modern'>('modern')
   const [historicalOpacity, setHistoricalOpacity] = useState(0.45)
-  const [mapHudOpen, _setMapHudOpen] = useState(false)
-  const [mapFullscreen, _setMapFullscreen] = useState(false)
-  const [_terrainBarExpanded, _setTerrainBarExpanded] = useState(false)
-  const [shadowModeOn, _setShadowModeOn] = useState(true)
+  const [mapHudOpen, setMapHudOpen] = useState(false)
+  const [mapFullscreen, setMapFullscreen] = useState(false)
+  const [terrainBarExpanded, setTerrainBarExpanded] = useState(false)
+  const [shadowModeOn, setShadowModeOn] = useState(true)
   const [claudeStatus, setClaudeStatus] = useState<ServiceStatus>('loading')
   const urlSiteAppliedRef = useRef(false)
 
@@ -485,13 +584,11 @@ export default function App() {
     const terrainLine =
       terrainDemSource === 'ea_1m'
         ? 'LiDAR 1m (EA 2022) ✓'
-        : terrainDemSource === 'eu_25m'
-          ? 'EU DEM 25m (COP30) ✓'
-          : terrainDemSource === 'srtm_30m'
-            ? 'SRTM 30m ✓'
-            : lidarEwLabel === 'loading'
-              ? 'Terrain …'
-              : 'Open-Meteo / Mapbox ✓'
+        : lidarEwLabel === 'loading'
+          ? 'Terrain …'
+          : lidarEwLabel === 'outside'
+            ? 'Open-Meteo / Mapbox (no tile DEM) ✓'
+            : 'Open-Meteo / Mapbox ✓'
     const coverage = apiSite ? terrainCoverageSummary(apiSite.lat, apiSite.lng) : '—'
     let move = 'Movement unavailable'
     if (ground.status === 'loading') move = 'Movement …'
@@ -548,20 +645,16 @@ export default function App() {
       return
     }
     logLidarCoverageCheck(apiSite.lat, apiSite.lng)
-    const ac = new AbortController()
     lidarFetchAbortRef.current?.abort()
-    lidarFetchAbortRef.current = ac
-    let cancelled = false
+    lidarFetchAbortRef.current = new AbortController()
+    const ac = lidarFetchAbortRef.current
     ;(async () => {
       setLidarEwLabel('loading')
       setTerrainDemSource('none')
       setLidarProgressDetail('Loading terrain raster…')
-      const { z, x, y } = siteToTileZ14(apiSite.lat, apiSite.lng)
-      const bbox = tileBoundsWgs84(z, x, y)
-      const [west, south, east, north] = bbox
 
       const failTerrain = (msg: string) => {
-        if (cancelled) return
+        if (ac.signal.aborted) return
         setLidarEwLabel('error')
         setTerrainDemSource('none')
         setLidarDtmGrid(null)
@@ -571,71 +664,50 @@ export default function App() {
 
       try {
         if (isEwLidarCoverage(apiSite.lat, apiSite.lng)) {
+          const { z, x, y } = siteToTileZ14(apiSite.lat, apiSite.lng)
+          const [west, south, east, north] = tileBoundsWgs84(z, x, y)
           const kDtm = lidarTileCacheKey('dtm', z, x, y)
           const kDsm = lidarTileCacheKey('dsm', z, x, y)
           let bufDtm = await loadCachedTiff(kDtm)
           if (!bufDtm) {
-            bufDtm = await fetchEaLidarTiff(EA_LIDAR_DTM_EXPORT, bbox, ac.signal, 'dtm')
+            bufDtm = await fetchEaLidarWms('dtm', west, south, east, north, ac.signal)
             saveCachedTiff(kDtm, bufDtm)
           }
-          if (cancelled) return
+          if (ac.signal.aborted) return
           const dtm = await parseEaLidarTiff(bufDtm)
+          if (ac.signal.aborted) return
           setLidarDtmGrid(dtm)
           setLidarProgressDetail('Loading EA LiDAR DSM…')
 
           let bufDsm = await loadCachedTiff(kDsm)
           if (!bufDsm) {
-            bufDsm = await fetchEaLidarTiff(EA_LIDAR_DSM_EXPORT, bbox, ac.signal, 'dsm')
+            bufDsm = await fetchEaLidarWms('dsm', west, south, east, north, ac.signal)
             saveCachedTiff(kDsm, bufDsm)
           }
-          if (cancelled) return
+          if (ac.signal.aborted) return
           const dsm = await parseEaLidarTiff(bufDsm)
-          setLidarDsmGrid(dsm)
-          setLidarEwLabel('covered')
-          setTerrainDemSource('ea_1m')
-          setLidarProgressDetail('LiDAR terrain ready ✓ · roof detection running…')
-          return
-        }
-
-        if (isEuropeCop30Coverage(apiSite.lat, apiSite.lng)) {
-          setLidarProgressDetail('Loading EU DEM (COP30 via OpenTopography)…')
-          const key = openTopoCacheKey('COP30', west, south, east, north)
-          let buf = await loadCachedTiff(key)
-          if (!buf) {
-            buf = await fetchOpenTopoGlobaldemTiff('COP30', west, south, east, north, ac.signal)
-            saveCachedTiff(key, buf)
+          if (!ac.signal.aborted) {
+            setLidarDsmGrid(dsm)
+            setLidarEwLabel('covered')
+            setTerrainDemSource('ea_1m')
+            setLidarProgressDetail('LiDAR terrain ready ✓ · roof detection running…')
           }
-          if (cancelled) return
-          const dtm = await parseEaLidarTiff(buf)
-          setLidarDtmGrid(dtm)
-          setLidarDsmGrid(null)
-          setLidarEwLabel('covered')
-          setTerrainDemSource('eu_25m')
-          setLidarProgressDetail('EU DEM (~25 m) ready ✓ · DSM / trees from OSM only in this zone')
           return
         }
 
-        setLidarProgressDetail('Loading SRTM (OpenTopography)…')
-        const sKey = openTopoCacheKey('SRTMGL1', west, south, east, north)
-        let sBuf = await loadCachedTiff(sKey)
-        if (!sBuf) {
-          sBuf = await fetchOpenTopoGlobaldemTiff('SRTMGL1', west, south, east, north, ac.signal)
-          saveCachedTiff(sKey, sBuf)
-        }
-        if (cancelled) return
-        const sDtm = await parseEaLidarTiff(sBuf)
-        setLidarDtmGrid(sDtm)
+        if (ac.signal.aborted) return
+        setLidarDtmGrid(null)
         setLidarDsmGrid(null)
-        setLidarEwLabel('covered')
-        setTerrainDemSource('srtm_30m')
-        setLidarProgressDetail('SRTM (~30 m) ready ✓ · DSM / trees from OSM only')
-      } catch {
+        setLidarEwLabel('outside')
+        setTerrainDemSource('none')
+        setLidarProgressDetail('Outside EA 1m LiDAR — contours off tile; section uses Open-Meteo → Mapbox terrain')
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === 'AbortError') return
         failTerrain('Terrain raster failed — section will use Open-Meteo / Mapbox')
       }
     })()
     return () => {
-      cancelled = true
-      ac.abort()
+      lidarFetchAbortRef.current?.abort()
     }
     /* Coordinate-based fetch only; avoid re-running when unrelated `site` fields change. */
     // eslint-disable-next-line react-hooks/exhaustive-deps -- apiSite.lat/lng are the intended trigger
@@ -719,8 +791,8 @@ export default function App() {
     const features = terrainContoursOsStyle(lidarDtmGrid, apiSite.lat, apiSite.lng)
     const fc: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: features as GeoJSON.Feature[] }
     if (!map.getSource(LIDAR_TERRAIN_CONTOUR_SOURCE_ID)) {
-      map.addSource(LIDAR_TERRAIN_CONTOUR_SOURCE_ID, { type: 'geojson', data: fc })
-      map.addLayer({
+      safeAddSource(map, LIDAR_TERRAIN_CONTOUR_SOURCE_ID, { type: 'geojson', data: fc })
+      safeAddLayer(map, {
         id: LIDAR_TERRAIN_CONTOUR_LAYER_ID,
         type: 'line',
         source: LIDAR_TERRAIN_CONTOUR_SOURCE_ID,
@@ -732,7 +804,7 @@ export default function App() {
         },
       })
     } else {
-      ;(map.getSource(LIDAR_TERRAIN_CONTOUR_SOURCE_ID) as mapboxgl.GeoJSONSource).setData(fc)
+      safeSetGeoJsonData(map, LIDAR_TERRAIN_CONTOUR_SOURCE_ID, fc)
     }
   }, [mapLoaded, lidarDtmGrid, apiSite?.lat, apiSite?.lng])
 
@@ -746,8 +818,8 @@ export default function App() {
     }
     const fc = slopeGeoJsonFromGrid(lidarDtmGrid, apiSite.lat, apiSite.lng, 500, 3)
     if (!map.getSource(SLOPE_SOURCE_ID)) {
-      map.addSource(SLOPE_SOURCE_ID, { type: 'geojson', data: fc })
-      map.addLayer({
+      safeAddSource(map, SLOPE_SOURCE_ID, { type: 'geojson', data: fc })
+      safeAddLayer(map, {
         id: SLOPE_LAYER_ID,
         type: 'fill',
         source: SLOPE_SOURCE_ID,
@@ -759,7 +831,7 @@ export default function App() {
         },
       })
     } else {
-      ;(map.getSource(SLOPE_SOURCE_ID) as mapboxgl.GeoJSONSource).setData(fc)
+      safeSetGeoJsonData(map, SLOPE_SOURCE_ID, fc)
     }
   }, [mapLoaded, lidarDtmGrid, apiSite?.lat, apiSite?.lng, slopeOverlayOn])
 
@@ -777,8 +849,8 @@ export default function App() {
       if (cancelled || !mapRef.current) return
       const m = mapRef.current
       if (!m.getSource(EGMS_HEATMAP_SOURCE_ID)) {
-        m.addSource(EGMS_HEATMAP_SOURCE_ID, { type: 'geojson', data: fc })
-        m.addLayer({
+        safeAddSource(m, EGMS_HEATMAP_SOURCE_ID, { type: 'geojson', data: fc })
+        safeAddLayer(m, {
           id: EGMS_HEATMAP_LAYER_ID,
           type: 'heatmap',
           source: EGMS_HEATMAP_SOURCE_ID,
@@ -811,7 +883,7 @@ export default function App() {
           },
         })
       } else {
-        ;(m.getSource(EGMS_HEATMAP_SOURCE_ID) as mapboxgl.GeoJSONSource).setData(fc)
+        safeSetGeoJsonData(m, EGMS_HEATMAP_SOURCE_ID, fc)
       }
     })()
     return () => {
@@ -851,46 +923,64 @@ export default function App() {
       bearing: 0,
     })
     map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), 'top-right')
+    const attachMapbox3dBuildings = () => {
+      if (!map.getSource('composite')) return
+      safeAddLayer(map, {
+        id: MAPBOX_BUILDING_LAYER_ID,
+        source: 'composite',
+        'source-layer': 'building',
+        filter: ['==', 'extrude', 'true'],
+        type: 'fill-extrusion',
+        minzoom: 14,
+        paint: {
+          'fill-extrusion-color': '#aaaaaa',
+          'fill-extrusion-height': ['get', 'height'],
+          'fill-extrusion-base': ['get', 'min_height'],
+          'fill-extrusion-opacity': 0.9,
+        },
+      })
+    }
     map.on('load', () => {
       map.resize()
-      setMapLoaded(true)
-      // Basic fallback: only native Mapbox 3D buildings.
-      if (!map.getLayer(MAPBOX_BUILDING_LAYER_ID) && map.getSource('composite')) {
-        map.addLayer({
-          id: MAPBOX_BUILDING_LAYER_ID,
-          source: 'composite',
-          'source-layer': 'building',
-          filter: ['==', 'extrude', 'true'],
-          type: 'fill-extrusion',
-          minzoom: 14,
-          paint: {
-            'fill-extrusion-color': '#aaaaaa',
-            'fill-extrusion-height': ['get', 'height'],
-            'fill-extrusion-base': ['get', 'min_height'],
-            'fill-extrusion-opacity': 0.9,
-          },
-        })
+      try {
+        if (!map.getSource('mapbox-dem')) {
+          map.addSource('mapbox-dem', {
+            type: 'raster-dem',
+            url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
+            tileSize: 512,
+            maxzoom: 14,
+          } as mapboxgl.AnySourceData)
+        }
+        if (!map.getTerrain()) {
+          map.setTerrain({ source: 'mapbox-dem', exaggeration: 1 })
+        }
+      } catch (e) {
+        console.warn('Mapbox terrain (optional):', e)
       }
-    })
-    map.on('style.load', () => {
-      if (!map.getLayer(MAPBOX_BUILDING_LAYER_ID) && map.getSource('composite')) {
-        map.addLayer({
-          id: MAPBOX_BUILDING_LAYER_ID,
-          source: 'composite',
-          'source-layer': 'building',
-          filter: ['==', 'extrude', 'true'],
-          type: 'fill-extrusion',
-          minzoom: 14,
-          paint: {
-            'fill-extrusion-color': '#aaaaaa',
-            'fill-extrusion-height': ['get', 'height'],
-            'fill-extrusion-base': ['get', 'min_height'],
-            'fill-extrusion-opacity': 0.9,
-          },
-        })
+      if (!BASIC_3D_BUILDINGS_ONLY) {
+        if (!map.getSource(SHADOW_SOURCE_ID)) {
+          map.addSource(SHADOW_SOURCE_ID, {
+            type: 'geojson',
+            data: { type: 'FeatureCollection', features: [] },
+          })
+        }
+        if (!map.getLayer(SHADOW_LAYER_ID)) {
+          map.addLayer({
+            id: SHADOW_LAYER_ID,
+            type: 'fill',
+            source: SHADOW_SOURCE_ID,
+            layout: { visibility: 'none' },
+            paint: {
+              'fill-color': '#000000',
+              'fill-opacity': 0.45,
+            },
+          })
+        }
       }
       setMapLoaded(true)
+      attachMapbox3dBuildings()
     })
+    map.on('style.load', attachMapbox3dBuildings)
     mapRef.current = map
     setMapInstance(map)
     return () => {
@@ -961,7 +1051,6 @@ export default function App() {
     if (s.lat === 0 && s.lng === 0) {
       markerRef.current?.remove()
       markerRef.current = null
-      map.flyTo({ center: UK_CENTER, zoom: UK_ZOOM, pitch: 0, bearing: 0, essential: true })
       return
     }
     if (!markerRef.current) {
@@ -971,14 +1060,6 @@ export default function App() {
     } else {
       markerRef.current.setLngLat([s.lng, s.lat])
     }
-    map.flyTo({
-      center: [s.lng, s.lat],
-      zoom: 15,
-      pitch: 0,
-      bearing: 0,
-      essential: true,
-      duration: 1100,
-    })
   }, [])
 
   const saveCurrentSite = useCallback(() => {
@@ -1096,7 +1177,7 @@ export default function App() {
     }
     if (historicalEnabled) {
       if (!map.getSource(HISTORICAL_SOURCE_ID)) {
-        map.addSource(HISTORICAL_SOURCE_ID, {
+        safeAddSource(map, HISTORICAL_SOURCE_ID, {
           type: 'raster',
           tiles: urlsByYear[historicalYear],
           tileSize: 256,
@@ -1107,7 +1188,7 @@ export default function App() {
         src.setTiles(urlsByYear[historicalYear])
       }
       if (!map.getLayer(HISTORICAL_LAYER_ID)) {
-        map.addLayer({
+        safeAddLayer(map, {
           id: HISTORICAL_LAYER_ID,
           type: 'raster',
           source: HISTORICAL_SOURCE_ID,
@@ -1139,31 +1220,13 @@ export default function App() {
     }
   }, [mapInstance, site])
 
-  /** Valid site → fly to pin (share links may include zoom); no site → UK overview. */
+  /** Single camera sync: valid site → street fly-to; cleared site → UK overview. Share `?zoom=` only if 3–22. */
   useEffect(() => {
     const map = mapRef.current
     if (!map || !mapLoaded) return
-    if (apiSite) {
-      const p = new URLSearchParams(window.location.search)
-      const urlZoom = Number(p.get('zoom'))
-      map.flyTo({
-        center: [apiSite.lng, apiSite.lat],
-        zoom: Number.isFinite(urlZoom) ? urlZoom : 15,
-        pitch: 0,
-        bearing: 0,
-        essential: true,
-      })
-    } else {
-      map.flyTo({
-        center: UK_CENTER,
-        zoom: UK_ZOOM,
-        pitch: 0,
-        bearing: 0,
-        essential: true,
-      })
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- fly when coordinates change, not whole `apiSite` object
-  }, [mapLoaded, apiSite?.lat, apiSite?.lng])
+    flyMapToSite(map, site)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fly when coordinates change, not whole `site` object
+  }, [mapLoaded, site?.lat, site?.lng])
 
   useEffect(() => {
     const map = mapRef.current
@@ -1255,13 +1318,13 @@ export default function App() {
     const map = mapRef.current
     if (!map || !mapLoaded) return
     if (!map.getSource(SECTION_SOURCE_ID)) {
-      map.addSource(SECTION_SOURCE_ID, {
+      safeAddSource(map, SECTION_SOURCE_ID, {
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] },
       })
     }
     if (!map.getLayer(SECTION_LINE_LAYER_ID)) {
-      map.addLayer({
+      safeAddLayer(map, {
         id: SECTION_LINE_LAYER_ID,
         type: 'line',
         source: SECTION_SOURCE_ID,
@@ -1270,7 +1333,7 @@ export default function App() {
       })
     }
     if (!map.getLayer(SECTION_POINT_LAYER_ID)) {
-      map.addLayer({
+      safeAddLayer(map, {
         id: SECTION_POINT_LAYER_ID,
         type: 'circle',
         source: SECTION_SOURCE_ID,
@@ -1279,7 +1342,7 @@ export default function App() {
       })
     }
     if (!map.getLayer('sonde-section-labels')) {
-      map.addLayer({
+      safeAddLayer(map, {
         id: 'sonde-section-labels',
         type: 'symbol',
         source: SECTION_SOURCE_ID,
@@ -1295,7 +1358,7 @@ export default function App() {
       })
     }
     if (!map.getLayer('sonde-section-direction')) {
-      map.addLayer({
+      safeAddLayer(map, {
         id: 'sonde-section-direction',
         type: 'symbol',
         source: SECTION_SOURCE_ID,
@@ -1310,7 +1373,7 @@ export default function App() {
       })
     }
     if (!map.getLayer('sonde-section-eye')) {
-      map.addLayer({
+      safeAddLayer(map, {
         id: 'sonde-section-eye',
         type: 'symbol',
         source: SECTION_SOURCE_ID,
@@ -1325,7 +1388,6 @@ export default function App() {
         paint: { 'text-color': '#E8621A', 'text-halo-color': '#0e0d0c', 'text-halo-width': 1 },
       })
     }
-    const source = map.getSource(SECTION_SOURCE_ID) as mapboxgl.GeoJSONSource
     const features: GeoJSON.Feature[] = []
     if (sectionPoints.length >= 2) {
       const mid: SectionPoint = {
@@ -1369,29 +1431,19 @@ export default function App() {
         geometry: { type: 'Point', coordinates: [pt.lng, pt.lat] },
       })
     })
-    source.setData({ type: 'FeatureCollection', features })
+    safeSetGeoJsonData(map, SECTION_SOURCE_ID, { type: 'FeatureCollection', features })
   }, [mapLoaded, sectionPoints, sectionFlip])
 
   const rebuildSectionProfile = useCallback(
     (start: SectionPoint, end: SectionPoint) => {
-      const map = mapRef.current
-      if (!map) return
-      const distanceM = Math.max(1, haversineM(start.lat, start.lng, end.lat, end.lng))
-      const hasPin = site != null && (site.lat !== 0 || site.lng !== 0)
-      const targetCenter: [number, number] = hasPin
-        ? [site!.lng, site!.lat]
-        : [(start.lng + end.lng) / 2, (start.lat + end.lat) / 2]
-      map.easeTo({
-        center: targetCenter,
-        zoom: 15,
-        pitch: 0,
-        duration: 450,
-      })
-
+      const totalDistM = Math.max(1, haversineM(start.lat, start.lng, end.lat, end.lng))
       const lngA = start.lng
       const latA = start.lat
       const lngB = end.lng
       const latB = end.lat
+      console.log('Section A:', latA, lngA)
+      console.log('Section B:', latB, lngB)
+      console.log('Distance:', totalDistM, 'm')
       const points: Array<{ lat: number; lng: number }> = []
       for (let i = 0; i < 60; i += 1) {
         const t = i / 59
@@ -1405,33 +1457,46 @@ export default function App() {
         try {
           const grid = lidarDtmGridRef.current
           let elevs: number[] | null = grid ? sectionElevationsFromLidar(grid, points) : null
-          let source: 'lidar' | 'opentopo' | 'openmeteo' | 'mapbox' = 'lidar'
-          if (!elevs) {
-            const lats = points.map((p) => p.lat)
-            const lngs = points.map((p) => p.lng)
-            const pad = 0.0012
-            const south = Math.min(...lats) - pad
-            const north = Math.max(...lats) + pad
-            const west = Math.min(...lngs) - pad
-            const east = Math.max(...lngs) + pad
-            const demGrid = await fetchDemGridForBounds(south, north, west, east)
-            if (demGrid) {
-              elevs = sectionElevationsFromLidar(demGrid, points)
-              if (elevs) source = 'opentopo'
-            }
-          }
+          let source: 'lidar' | 'openmeteo' | 'mapbox' = 'lidar'
           if (!elevs) {
             source = 'openmeteo'
             try {
               elevs = await sampleOpenMeteoElevations(points)
             } catch {
-              elevs = points.map(() => 0)
+              elevs = null
+            }
+          }
+          if (!elevs) {
+            const m = mapRef.current
+            const mb = m ? sampleMapboxTerrainElevations(m, points) : null
+            if (mb) {
+              elevs = mb
+              source = 'mapbox'
+            }
+          }
+          if (!elevs) {
+            elevs = points.map(() => 0)
+            source = 'openmeteo'
+          }
+          const spanOf = (arr: number[]) => {
+            if (!arr.length) return 0
+            return Math.max(...arr) - Math.min(...arr)
+          }
+          if (elevs && elevs.length === points.length && source === 'lidar' && spanOf(elevs) < 0.4) {
+            try {
+              const om = await sampleOpenMeteoElevations(points)
+              if (om.length === elevs.length && spanOf(om) > spanOf(elevs) + 0.08) {
+                elevs = om
+                source = 'openmeteo'
+              }
+            } catch {
+              /* keep DEM samples */
             }
           }
           const dense: ElevationSample[] = points.map((p, i) => ({
             lng: p.lng,
             lat: p.lat,
-            distanceM: (i / 59) * distanceM,
+            distanceM: (i / 59) * totalDistM,
             elevationM: elevs![i] ?? 0,
           }))
           const min = Math.min(...dense.map((s) => s.elevationM))
@@ -1443,14 +1508,14 @@ export default function App() {
           const dense: ElevationSample[] = points.map((p, i) => ({
             lng: p.lng,
             lat: p.lat,
-            distanceM: (i / 59) * distanceM,
+            distanceM: (i / 59) * totalDistM,
             elevationM: 0,
           }))
           setSectionProfile(dense)
         }
       })()
     },
-    [site]
+    []
   )
 
   useEffect(() => {
@@ -1622,12 +1687,12 @@ export default function App() {
       .filter((f): f is GeoJSON.Feature => !!f)
     const fc: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features }
     if (!map.getSource(OSM_BUILDING_SOURCE_ID)) {
-      map.addSource(OSM_BUILDING_SOURCE_ID, { type: 'geojson', data: fc })
+      safeAddSource(map, OSM_BUILDING_SOURCE_ID, { type: 'geojson', data: fc })
     } else {
-      ;(map.getSource(OSM_BUILDING_SOURCE_ID) as mapboxgl.GeoJSONSource).setData(fc)
+      safeSetGeoJsonData(map, OSM_BUILDING_SOURCE_ID, fc)
     }
     if (is3DView && !map.getLayer(OSM_BUILDING_LAYER_ID)) {
-      map.addLayer({
+      safeAddLayer(map, {
         id: OSM_BUILDING_LAYER_ID,
         type: 'fill-extrusion',
         source: OSM_BUILDING_SOURCE_ID,
@@ -1783,10 +1848,10 @@ export default function App() {
         geometry: { type: 'Point', coordinates: [t.lng, t.lat] },
       })),
     }
-    if (!map.getSource(TREE_SOURCE_ID)) map.addSource(TREE_SOURCE_ID, { type: 'geojson', data: fc })
-    else (map.getSource(TREE_SOURCE_ID) as mapboxgl.GeoJSONSource).setData(fc)
+    if (!map.getSource(TREE_SOURCE_ID)) safeAddSource(map, TREE_SOURCE_ID, { type: 'geojson', data: fc })
+    else safeSetGeoJsonData(map, TREE_SOURCE_ID, fc)
     if (!map.getLayer(TREE_LAYER_ID)) {
-      map.addLayer({
+      safeAddLayer(map, {
         id: TREE_LAYER_ID,
         type: 'circle',
         source: TREE_SOURCE_ID,
@@ -1798,7 +1863,7 @@ export default function App() {
       })
     }
     if (!map.getLayer(TREE_TRUNK_LAYER_ID)) {
-      map.addLayer({
+      safeAddLayer(map, {
         id: TREE_TRUNK_LAYER_ID,
         type: 'fill-extrusion',
         source: TREE_SOURCE_ID,
@@ -1811,7 +1876,7 @@ export default function App() {
       })
     }
     if (!map.getLayer(TREE_CANOPY_LAYER_ID)) {
-      map.addLayer({
+      safeAddLayer(map, {
         id: TREE_CANOPY_LAYER_ID,
         type: 'circle',
         source: TREE_SOURCE_ID,
@@ -1863,10 +1928,10 @@ export default function App() {
     const map = mapRef.current
     if (!map || !mapLoaded || !selectedShadowDateTime) return
     const fc = buildShadowFeatureCollection(selectedShadowDateTime)
-    if (!map.getSource(SHADOW_SOURCE_ID)) map.addSource(SHADOW_SOURCE_ID, { type: 'geojson', data: fc })
-    else (map.getSource(SHADOW_SOURCE_ID) as mapboxgl.GeoJSONSource).setData(fc)
+    if (!map.getSource(SHADOW_SOURCE_ID)) safeAddSource(map, SHADOW_SOURCE_ID, { type: 'geojson', data: fc })
+    else safeSetGeoJsonData(map, SHADOW_SOURCE_ID, fc)
     if (!map.getLayer(SHADOW_LAYER_ID)) {
-      map.addLayer({
+      safeAddLayer(map, {
         id: SHADOW_LAYER_ID,
         type: 'fill',
         source: SHADOW_SOURCE_ID,
@@ -1876,7 +1941,9 @@ export default function App() {
         },
       })
     }
-    map.setLayoutProperty(SHADOW_LAYER_ID, 'visibility', shadowModeOn ? 'visible' : 'none')
+    if (map.getLayer(SHADOW_LAYER_ID)) {
+      map.setLayoutProperty(SHADOW_LAYER_ID, 'visibility', shadowModeOn ? 'visible' : 'none')
+    }
     setMapPipelineStatus('Loading: buildings ✓ · trees ✓ · shadows ✓')
     setMapPipelineUpdatedAt(new Date())
   }, [mapLoaded, selectedShadowDateTime, buildShadowFeatureCollection, shadowModeOn])
@@ -1914,10 +1981,10 @@ export default function App() {
       })
     }
     const fc: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features }
-    if (!map.getSource(ROOF_CONTOUR_SOURCE_ID)) map.addSource(ROOF_CONTOUR_SOURCE_ID, { type: 'geojson', data: fc })
-    else (map.getSource(ROOF_CONTOUR_SOURCE_ID) as mapboxgl.GeoJSONSource).setData(fc)
+    if (!map.getSource(ROOF_CONTOUR_SOURCE_ID)) safeAddSource(map, ROOF_CONTOUR_SOURCE_ID, { type: 'geojson', data: fc })
+    else safeSetGeoJsonData(map, ROOF_CONTOUR_SOURCE_ID, fc)
     if (!map.getLayer(ROOF_CONTOUR_LAYER_ID)) {
-      map.addLayer({
+      safeAddLayer(map, {
         id: ROOF_CONTOUR_LAYER_ID,
         type: 'line',
         source: ROOF_CONTOUR_SOURCE_ID,
@@ -1972,12 +2039,12 @@ export default function App() {
     }
     const fc: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features }
     if (!map.getSource(SONDE_DYNAMIC_SOURCE_ID)) {
-      map.addSource(SONDE_DYNAMIC_SOURCE_ID, { type: 'geojson', data: fc })
+      safeAddSource(map, SONDE_DYNAMIC_SOURCE_ID, { type: 'geojson', data: fc })
     } else {
-      ;(map.getSource(SONDE_DYNAMIC_SOURCE_ID) as mapboxgl.GeoJSONSource).setData(fc)
+      safeSetGeoJsonData(map, SONDE_DYNAMIC_SOURCE_ID, fc)
     }
     const addIfMissing = (id: string, layer: mapboxgl.AnyLayer) => {
-      if (!map.getLayer(id)) map.addLayer(layer)
+      if (!map.getLayer(id)) safeAddLayer(map, layer)
     }
     addIfMissing('sonde-overlay-fill', {
       id: 'sonde-overlay-fill',
@@ -2183,7 +2250,7 @@ export default function App() {
         const centerM = (startM + endM) / 2
         const baseM = terrainAt(centerM)
         const topM = baseM + h
-        const label = bld.name && bld.buildingType ? `${bld.name} (${bld.buildingType})` : (bld.name ?? bld.buildingType ?? 'building')
+        const label = formatBuildingSectionLabel(bld)
         out.push({ startM, endM, topM, baseM, label, context: false })
         continue
       }
@@ -2209,7 +2276,7 @@ export default function App() {
         const h = resolvedHeight(bld) || 8
         const baseM = terrainAt(centerM)
         const topM = baseM + h
-        const label = bld.name ?? bld.buildingType ?? 'building'
+        const label = formatBuildingSectionLabel(bld)
         out.push({ startM, endM, topM, baseM, label, context: true })
       }
     }
@@ -2475,18 +2542,7 @@ export default function App() {
         return wrapModule('Local Intel', <LocalIntelModule site={site} />)
       case 'basemap':
         return wrapModule('Base map', (
-          <BaseMapModule
-            site={site}
-            radiusM={radiusM}
-            onRadius={setRadiusM}
-            historicalYear={historicalYear}
-            onHistoricalYear={setHistoricalYear}
-            historicalOpacity={historicalOpacity}
-            onHistoricalOpacity={setHistoricalOpacity}
-            historicalEnabled={historicalEnabled}
-            onHistoricalEnabled={setHistoricalEnabled}
-            state={osm}
-          />
+          <BaseMapModule site={site} radiusM={radiusM} onRadius={setRadiusM} state={osm} />
         ))
       case 'export':
         return wrapModule('Export', (
@@ -2573,7 +2629,7 @@ export default function App() {
         <div className="sonde-wordmark" aria-label="Sonde">
           SONDE
         </div>
-        <AddressSearch map={mapInstance} onSite={onSite} syncAddress={site?.address ?? null} />
+        <AddressSearch onSite={onSite} syncAddress={site?.address ?? null} />
         <button type="button" className="sonde-btn sonde-save-btn" onClick={saveCurrentSite} disabled={!apiSite}>
           <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
             <path d="M6 1.2a3.2 3.2 0 0 0-3.2 3.2c0 2.4 3.2 6.4 3.2 6.4s3.2-4 3.2-6.4A3.2 3.2 0 0 0 6 1.2Zm0 4.4a1.2 1.2 0 1 1 0-2.4 1.2 1.2 0 0 1 0 2.4Z" fill="currentColor" />
@@ -2663,340 +2719,445 @@ export default function App() {
 
         <main className="sonde-main">
           <div className="sonde-map-wrap">
-            {!token ? (
-              <div className="sonde-map-fallback">
-                <p>Set `VITE_MAPBOX_TOKEN` for the basemap canvas.</p>
-              </div>
-            ) : null}
-            <div
-              id="map-container"
-              ref={mapEl}
-              className="sonde-map"
-              role="presentation"
-              style={{ width: '100%', height: '500px' }}
-            />
-            {token ? (
-              <div
-                className="sonde-terrain-status-bar sonde-mono"
-                style={{
-                  fontSize: 11,
-                  lineHeight: 1.45,
-                  padding: '8px 12px',
-                  background: 'rgba(14,13,12,0.92)',
-                  color: '#c8c4bc',
-                  borderTop: '1px solid var(--sonde-edge, #333)',
-                }}
-              >
-                {terrainStatusBarText}
-              </div>
-            ) : null}
-            {shadowState && site ? (
-              <div className="sonde-map-overlay sonde-mono">
-                <span>{shadowState.time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                <span>alt {shadowState.altitude.toFixed(1)}°</span>
-                <span>azi {shadowState.azimuthFromNorth.toFixed(1)}°</span>
-              </div>
-            ) : null}
-            {apiSite && token && lidarEwLabel !== 'idle' ? (
-              <div
-                className={`sonde-map-lidar-badge sonde-mono ${
-                  lidarEwLabel === 'covered'
-                    ? 'sonde-map-lidar-badge--ok'
-                    : lidarEwLabel === 'loading'
-                      ? 'sonde-map-lidar-badge--loading'
-                      : 'sonde-map-lidar-badge--warn'
-                }`}
-                role="status"
-              >
-                {lidarEwLabel === 'covered'
-                  ? 'LiDAR ✓ 1m resolution'
-                  : lidarEwLabel === 'loading'
-                    ? 'LiDAR … loading'
-                    : 'LiDAR ✗ using estimates'}
-              </div>
-            ) : null}
-          </div>
-
-          <ModuleErrorBoundary moduleName="Map tools">
-          <section className="sonde-map-tools">
-            <div className="sonde-map-tools-row">
-              <button
-                type="button"
-                className={`sonde-btn ${is3DView ? 'sonde-btn--primary' : ''}`}
-                disabled={!mapInstance}
-                onClick={() => setIs3DView((v) => !v)}
-              >
-                {is3DView ? 'Flat / 3D: 3D' : 'Flat / 3D: Flat'}
-              </button>
-              <button
-                type="button"
-                className={`sonde-btn ${sectionMode ? 'sonde-btn--primary' : ''}`}
-                disabled={!mapInstance}
-                onClick={() => setSectionMode((v) => !v)}
-              >
-                Draw Section
-              </button>
-              <button
-                type="button"
-                className="sonde-btn sonde-btn--ghost"
-                disabled={!mapInstance}
-                onClick={() => {
-                  setSectionPoints([])
-                  setSectionProfile(null)
-                }}
-              >
-                Clear Section
-              </button>
-              <button
-                type="button"
-                className="sonde-btn sonde-btn--ghost"
-                disabled={!sectionProfile || sectionProfile.length < 2}
-                onClick={downloadSectionSvg}
-              >
-                Download section SVG
-              </button>
-              <button
-                type="button"
-                className={`sonde-btn ${treesEnabled ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
-                disabled={osm.status !== 'ok'}
-                onClick={() => toggleTrees(!treesEnabled)}
-              >
-                {treesEnabled ? 'Trees ON' : 'Trees OFF'}
-              </button>
-              <button
-                type="button"
-                className={`sonde-btn ${roofContoursEnabled ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
-                disabled={osm.status !== 'ok'}
-                onClick={() => setRoofContoursEnabled((v) => !v)}
-              >
-                {roofContoursEnabled ? 'Roof contours ON' : 'Roof contours OFF'}
-              </button>
-              <button
-                type="button"
-                className={`sonde-btn ${lidarHeightsEnabled ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
-                disabled={osm.status !== 'ok'}
-                onClick={() => setLidarHeightsEnabled((v) => !v)}
-              >
-                {lidarHeightsEnabled ? 'LiDAR heights ON' : 'LiDAR heights OFF'}
-              </button>
-              <button
-                type="button"
-                className={`sonde-btn ${egmsHeatmapOn ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
-                disabled={!mapInstance || !apiSite}
-                onClick={() => setEgmsHeatmapOn((v) => !v)}
-              >
-                {egmsHeatmapOn ? 'Ground movement heatmap ON' : 'Ground movement heatmap OFF'}
-              </button>
-              <button
-                type="button"
-                className={`sonde-btn ${slopeOverlayOn ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
-                disabled={!mapInstance || !lidarDtmGrid}
-                onClick={() => setSlopeOverlayOn((v) => !v)}
-              >
-                {slopeOverlayOn ? 'Slope analysis ON' : 'Slope analysis OFF'}
-              </button>
-            </div>
-            {treeStatus ? <p className="sonde-hint">{treeStatus}</p> : null}
-            {lidarStatus ? <p className="sonde-hint">{lidarStatus}</p> : null}
-            {lidarProgressDetail ? (
-              <p className="sonde-hint sonde-mono">{lidarProgressDetail}</p>
-            ) : null}
-            <p className="sonde-hint sonde-mono">
-              {`Terrain: ${
-                terrainDemSource === 'ea_1m'
-                  ? 'EA LiDAR 1m'
-                  : terrainDemSource === 'eu_25m'
-                    ? 'COP30 ~25m'
-                    : terrainDemSource === 'srtm_30m'
-                      ? 'SRTM 30m'
-                      : lidarEwLabel === 'loading'
-                        ? '… loading'
-                        : lidarEwLabel === 'error'
-                          ? '✗ fetch failed'
-                          : '—'
-              } | LiDAR tile: ${
-                lidarEwLabel === 'covered' ? '✓' : lidarEwLabel === 'loading' ? '…' : lidarEwLabel === 'error' ? '✗' : '—'
-              } | Buildings: ${lidarHeightsEnabled ? 'LiDAR tile / fallback' : 'Mapbox/OSM'} | Trees: OSM + LiDAR (deduped) | Shadows: calculated | ${mapPipelineStatus} | Last updated: ${mapPipelineUpdatedAt ? mapPipelineUpdatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}`}
-            </p>
-
-            <div className="sonde-map-tools-grid">
-              <label className="sonde-label sonde-label--precision">
-                Day of year
-                <input
-                  type="range"
-                  min={0}
-                  max={364}
-                  step={1}
-                  disabled={!apiSite}
-                  value={shadowDayIndex}
-                  onChange={(e) => setShadowDayIndex(Number(e.target.value))}
-                />
-                <span className="sonde-mono">
-                  {shadowState?.date.toLocaleDateString([], { month: 'short', day: '2-digit' }) ?? '—'}
-                </span>
-              </label>
-              <label className="sonde-label sonde-label--precision">
-                Time (sunrise → sunset)
-                <input
-                  type="range"
-                  min={0}
-                  max={1000}
-                  step={1}
-                  disabled={!apiSite}
-                  value={shadowDayProgress}
-                  onChange={(e) => setShadowDayProgress(Number(e.target.value))}
-                />
-                <span className="sonde-mono">
-                  {shadowState?.sunrise.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) ?? '--:--'}-
-                  {shadowState?.sunset.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) ?? '--:--'}
-                </span>
-              </label>
-            </div>
-            <p className="sonde-hint sonde-mono">
-              {shadowState
-                ? `${shadowState.date.toLocaleDateString([], { day: '2-digit', month: 'short' })} · ${shadowState.time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · Alt: ${shadowState.altitude.toFixed(0)}° · Azi: ${shadowState.azimuthFromNorth.toFixed(0)}°`
-                : '—'}
-            </p>
-
-            <div className="sonde-preset-row">
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(6, 21, 9)} disabled={!apiSite}>
-                Summer 09:00
-              </button>
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(6, 21, 12)} disabled={!apiSite}>
-                Summer 12:00
-              </button>
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(6, 21, 15)} disabled={!apiSite}>
-                Summer 15:00
-              </button>
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(12, 21, 9)} disabled={!apiSite}>
-                Winter 09:00
-              </button>
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(12, 21, 12)} disabled={!apiSite}>
-                Winter 12:00
-              </button>
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(12, 21, 15)} disabled={!apiSite}>
-                Winter 15:00
-              </button>
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(3, 21, 12)} disabled={!apiSite}>
-                Spring 12:00
-              </button>
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(9, 21, 12)} disabled={!apiSite}>
-                Autumn 12:00
-              </button>
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={applyShadowNow} disabled={!apiSite}>
-                Now
-              </button>
-              <button type="button" className={`sonde-btn ${shadowAnimating ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`} onClick={() => setShadowAnimating(true)} disabled={!apiSite || shadowAnimating}>
-                ▶ Play
-              </button>
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => setShadowAnimating(false)} disabled={!shadowAnimating}>
-                ■ Stop
-              </button>
-            </div>
-
-            {shadowStudyData ? (
-              <div className="sonde-panel" style={{ marginTop: 10 }}>
-                <h3 className="sonde-subhead">Shadow Analysis</h3>
-                <div className="sonde-card-grid">
-                  <article className="sonde-card">
-                    <h4>Sunlight Hours Map</h4>
-                    <svg id="sonde-svg-sunlight-hours" viewBox="0 0 220 220" className="sonde-svg">
-                      <rect x="0" y="0" width="220" height="220" fill="#111" />
-                      {shadowStudyData.cells.map((c, i) => {
-                        const x = 110 + (c.x / Math.max(1, radiusM)) * 100
-                        const y = 110 - (c.y / Math.max(1, radiusM)) * 100
-                        const s = Math.max(0, Math.min(1, c.summer / 10))
-                        const r = Math.round(255 * (1 - s))
-                        const g = Math.round(200 * s + 30)
-                        return <rect key={`sun-cell-${i}`} x={x - 2} y={y - 2} width={4} height={4} fill={`rgb(${r},${g},60)`} />
-                      })}
-                      <circle cx="110" cy="110" r="100" fill="none" stroke="#555" />
-                    </svg>
-                  </article>
-                  <article className="sonde-card">
-                    <h4>Shadow Range (Summer/Winter)</h4>
-                    <svg id="sonde-svg-shadow-range-summer" viewBox="0 0 220 220" className="sonde-svg">
-                      <rect x="0" y="0" width="220" height="220" fill="#111" />
-                      {shadowStudyData.summerRange.map((set, k) =>
-                        set.map((poly, i) => (
-                          <polygon
-                            key={`sum-${k}-${i}`}
-                            points={poly.map((p) => `${110 + (p.x / Math.max(1, radiusM)) * 90},${110 - (p.y / Math.max(1, radiusM)) * 90}`).join(' ')}
-                            fill={k === 0 ? '#777' : k === 1 ? '#555' : '#333'}
-                            stroke="none"
-                          />
-                        ))
-                      )}
-                    </svg>
-                    <svg id="sonde-svg-shadow-range-winter" viewBox="0 0 220 220" className="sonde-svg" style={{ marginTop: 6 }}>
-                      <rect x="0" y="0" width="220" height="220" fill="#111" />
-                      {shadowStudyData.winterRange.map((set, k) =>
-                        set.map((poly, i) => (
-                          <polygon
-                            key={`win-${k}-${i}`}
-                            points={poly.map((p) => `${110 + (p.x / Math.max(1, radiusM)) * 90},${110 - (p.y / Math.max(1, radiusM)) * 90}`).join(' ')}
-                            fill={k === 0 ? '#777' : k === 1 ? '#555' : '#333'}
-                            stroke="none"
-                          />
-                        ))
-                      )}
-                    </svg>
-                  </article>
-                  <article className="sonde-card">
-                    <h4>Annual Shadow Calendar</h4>
-                    <svg id="sonde-svg-shadow-calendar" viewBox="0 0 300 160" className="sonde-svg">
-                      <rect x="0" y="0" width="300" height="160" fill="#111" />
-                      {shadowStudyData.calendar.map((c) => {
-                        const x = 20 + c.hour * 11
-                        const y = 10 + (c.month - 1) * 12
-                        const fill = c.state === 'night' ? '#000' : c.state === 'shadow' ? '#777' : '#f1d66a'
-                        return <rect key={`cal-${c.month}-${c.hour}`} x={x} y={y} width={10} height={10} fill={fill} />
-                      })}
-                    </svg>
-                  </article>
-                  <article className="sonde-card">
-                    <h4>Sky View Factor + Daylight</h4>
-                    <svg id="sonde-svg-svf" viewBox="0 0 220 220" className="sonde-svg">
-                      <rect x="0" y="0" width="220" height="220" fill="#111" />
-                      <circle cx="110" cy="110" r="90" fill="#f1d66a" stroke="#333" />
-                      <circle cx="110" cy="110" r={90 * (1 - shadowStudyData.svf)} fill="#1f1f1f" />
-                      <text x="110" y="114" textAnchor="middle" fill="#fff" className="sonde-svg-text" fontSize="12">{`SVF: ${shadowStudyData.svf.toFixed(2)}`}</text>
-                    </svg>
-                    <div className="sonde-map-tools-grid">
-                      <label className="sonde-label">Window w(m)<input type="number" value={dfWindowW} onChange={(e) => setDfWindowW(Number(e.target.value) || 0)} /></label>
-                      <label className="sonde-label">Window h(m)<input type="number" value={dfWindowH} onChange={(e) => setDfWindowH(Number(e.target.value) || 0)} /></label>
-                      <label className="sonde-label">Room depth(m)<input type="number" value={dfRoomDepth} onChange={(e) => setDfRoomDepth(Number(e.target.value) || 0)} /></label>
-                      <label className="sonde-label">Obstruction °<input type="number" value={dfObstructionDeg} onChange={(e) => setDfObstructionDeg(Number(e.target.value) || 0)} /></label>
-                    </div>
-                    <p className="sonde-hint">{`Estimated Daylight Factor: ${daylightFactor.value.toFixed(2)}% · ${daylightFactor.rag === 'green' ? '🟢' : daylightFactor.rag === 'amber' ? '🟡' : '🔴'} · Nursery 3%: ${daylightFactor.nurseryPass ? 'Yes' : 'No'}`}</p>
-                  </article>
-                  <article className="sonde-card">
-                    <h4>Solar Radiation Heatmap</h4>
-                    <svg id="sonde-svg-solar-radiation" viewBox="0 0 220 220" className="sonde-svg">
-                      <rect x="0" y="0" width="220" height="220" fill="#111" />
-                      {shadowStudyData.cells.map((c, i) => {
-                        const x = 110 + (c.x / Math.max(1, radiusM)) * 100
-                        const y = 110 - (c.y / Math.max(1, radiusM)) * 100
-                        const s = Math.max(0, Math.min(1, c.solar / 10))
-                        const r = Math.round(255 * s)
-                        const b = Math.round(220 * (1 - s))
-                        return <rect key={`rad-cell-${i}`} x={x - 2} y={y - 2} width={4} height={4} fill={`rgb(${r},120,${b})`} />
-                      })}
-                    </svg>
-                  </article>
+            <div className={`sonde-map-stage${mapHudOpen && !mapFullscreen ? ' sonde-map-stage--hud-open' : ''}`}>
+              {!token ? (
+                <div className="sonde-map-fallback">
+                  <p>Set `VITE_MAPBOX_TOKEN` for the basemap canvas.</p>
                 </div>
-                {shadowSummary ? (
-                  <p className="sonde-hint">
-                    {`South facade: ${shadowSummary.southSummer.toFixed(1)}hrs sun in summer, ${shadowSummary.southWinter.toFixed(1)}hrs in winter · North facade: ${shadowSummary.northSummer.toFixed(1)}hrs summer, ${shadowSummary.northWinter.toFixed(1)}hrs winter`}
-                  </p>
+              ) : null}
+              <div
+                id="map-container"
+                ref={mapEl}
+                className="sonde-map"
+                role="presentation"
+                style={{ width: '100%', height: '100%', minHeight: '400px', zIndex: 1 }}
+              />
+              {shadowState && site ? (
+                <div className="sonde-map-overlay sonde-map-overlay--sun sonde-mono" title={`Alt ${shadowState.altitude.toFixed(1)}° · Azi ${shadowState.azimuthFromNorth.toFixed(1)}°`}>
+                  <span>{shadowState.time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                </div>
+              ) : null}
+              {mapHudOpen && apiSite && token && lidarEwLabel !== 'idle' ? (
+                <div
+                  className={`sonde-map-lidar-badge sonde-mono ${
+                    lidarEwLabel === 'covered'
+                      ? 'sonde-map-lidar-badge--ok'
+                      : lidarEwLabel === 'loading'
+                        ? 'sonde-map-lidar-badge--loading'
+                        : 'sonde-map-lidar-badge--warn'
+                  }`}
+                  role="status"
+                >
+                  {lidarEwLabel === 'covered'
+                    ? 'LiDAR ✓ 1m resolution'
+                    : lidarEwLabel === 'loading'
+                      ? 'LiDAR … loading'
+                      : 'LiDAR ✗ using estimates'}
+                </div>
+              ) : null}
+
+              <div className="sonde-map-corner-actions">
+                <button
+                  type="button"
+                  className="sonde-map-icon-btn"
+                  title={mapFullscreen ? 'Exit full map' : 'Full map'}
+                  aria-label={mapFullscreen ? 'Exit full map' : 'Full map'}
+                  onClick={() => {
+                    if (mapFullscreen) setMapFullscreen(false)
+                    else {
+                      setMapFullscreen(true)
+                      setMapHudOpen(false)
+                    }
+                  }}
+                >
+                  {mapFullscreen ? '⤓' : '⤢'}
+                </button>
+                {!mapFullscreen ? (
+                  <button
+                    type="button"
+                    className={`sonde-map-icon-btn ${mapHudOpen ? 'sonde-map-icon-btn--active' : ''}`}
+                    title="Map controls"
+                    aria-label="Map controls"
+                    aria-expanded={mapHudOpen}
+                    onClick={() => setMapHudOpen((v) => !v)}
+                  >
+                    ⚙
+                  </button>
                 ) : null}
               </div>
-            ) : null}
 
-            {sectionProfile && sectionProfile.length > 1 ? (
-              <div className="sonde-section-profile">
-                <div className="sonde-map-tools-row" style={{ padding: '0.35rem 0.55rem 0' }}>
-                  <label className="sonde-label">
+              {mapHudOpen && !mapFullscreen ? (
+                <div className="sonde-map-hud" role="dialog" aria-label="Map controls">
+                  <div className="sonde-map-hud-inner">
+                    <h3 className="sonde-map-hud-title">Map controls</h3>
+                    <div className="sonde-map-hud-group">
+                      <button
+                        type="button"
+                        className={`sonde-btn sonde-btn--block ${is3DView ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
+                        disabled={!mapInstance}
+                        onClick={() => setIs3DView((v) => !v)}
+                      >
+                        {is3DView ? '3D view' : 'Flat view'}
+                      </button>
+                    </div>
+                    <div className="sonde-map-hud-group">
+                      <p className="sonde-map-hud-label">Section</p>
+                      <button
+                        type="button"
+                        className={`sonde-btn sonde-btn--block ${sectionMode ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
+                        disabled={!mapInstance}
+                        onClick={() => setSectionMode((v) => !v)}
+                      >
+                        {sectionMode ? 'Drawing… (click A, B)' : 'Draw section'}
+                      </button>
+                      <button
+                        type="button"
+                        className="sonde-btn sonde-btn--block sonde-btn--ghost"
+                        disabled={!mapInstance}
+                        onClick={() => {
+                          setSectionPoints([])
+                          setSectionProfile(null)
+                        }}
+                      >
+                        Clear section
+                      </button>
+                      <p className="sonde-hint sonde-map-hud-hint">
+                        {sectionMode ? 'Click point A then B on the map.' : 'Open to draw a terrain section; scale and direction appear on the map when ready.'}
+                      </p>
+                    </div>
+                    <div className="sonde-map-hud-group">
+                      <p className="sonde-map-hud-label">Layers</p>
+                      <button
+                        type="button"
+                        className={`sonde-btn sonde-btn--block ${treesEnabled ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
+                        disabled={osm.status !== 'ok'}
+                        onClick={() => toggleTrees(!treesEnabled)}
+                      >
+                        Trees {treesEnabled ? 'ON' : 'OFF'}
+                      </button>
+                      <button
+                        type="button"
+                        className={`sonde-btn sonde-btn--block ${roofContoursEnabled ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
+                        disabled={osm.status !== 'ok'}
+                        onClick={() => setRoofContoursEnabled((v) => !v)}
+                      >
+                        Roof contours {roofContoursEnabled ? 'ON' : 'OFF'}
+                      </button>
+                      <button
+                        type="button"
+                        className={`sonde-btn sonde-btn--block ${lidarHeightsEnabled ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
+                        disabled={osm.status !== 'ok'}
+                        onClick={() => setLidarHeightsEnabled((v) => !v)}
+                      >
+                        LiDAR heights {lidarHeightsEnabled ? 'ON' : 'OFF'}
+                      </button>
+                      <button
+                        type="button"
+                        className={`sonde-btn sonde-btn--block ${slopeOverlayOn ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
+                        disabled={!mapInstance || !lidarDtmGrid}
+                        onClick={() => setSlopeOverlayOn((v) => !v)}
+                      >
+                        Slope analysis {slopeOverlayOn ? 'ON' : 'OFF'}
+                      </button>
+                      <button
+                        type="button"
+                        className={`sonde-btn sonde-btn--block ${egmsHeatmapOn ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
+                        disabled={!mapInstance || !apiSite}
+                        onClick={() => setEgmsHeatmapOn((v) => !v)}
+                      >
+                        Ground movement {egmsHeatmapOn ? 'ON' : 'OFF'}
+                      </button>
+                    </div>
+                    <div className="sonde-map-hud-group">
+                      <p className="sonde-map-hud-label">Historical maps</p>
+                      <button
+                        type="button"
+                        className={`sonde-btn sonde-btn--block ${historicalEnabled ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
+                        disabled={!mapInstance}
+                        onClick={() => {
+                          if (!historicalEnabled) {
+                            setHistoricalEnabled(true)
+                            if (historicalYear === 'modern') setHistoricalYear('1950')
+                          } else {
+                            setHistoricalEnabled(false)
+                          }
+                        }}
+                      >
+                        Historical overlay {historicalEnabled ? 'ON' : 'OFF'}
+                      </button>
+                      <div className="sonde-map-hud-row">
+                        <button
+                          type="button"
+                          className={`sonde-btn sonde-btn--ghost ${historicalEnabled && historicalYear === '1890' ? 'sonde-btn--primary' : ''}`}
+                          onClick={() => {
+                            setHistoricalEnabled(true)
+                            setHistoricalYear('1890')
+                          }}
+                        >
+                          1890s
+                        </button>
+                        <button
+                          type="button"
+                          className={`sonde-btn sonde-btn--ghost ${historicalEnabled && historicalYear === '1950' ? 'sonde-btn--primary' : ''}`}
+                          onClick={() => {
+                            setHistoricalEnabled(true)
+                            setHistoricalYear('1950')
+                          }}
+                        >
+                          1950s
+                        </button>
+                        <button
+                          type="button"
+                          className={`sonde-btn sonde-btn--ghost ${!historicalEnabled || historicalYear === 'modern' ? 'sonde-btn--primary' : ''}`}
+                          onClick={() => {
+                            setHistoricalYear('modern')
+                            setHistoricalEnabled(false)
+                          }}
+                        >
+                          Modern
+                        </button>
+                      </div>
+                      <label className="sonde-label sonde-map-hud-label">
+                        Opacity
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={Math.round(historicalOpacity * 100)}
+                          disabled={!historicalEnabled}
+                          onChange={(e) => setHistoricalOpacity(Number(e.target.value) / 100)}
+                        />
+                        <span className="sonde-mono">{Math.round(historicalOpacity * 100)}%</span>
+                      </label>
+                    </div>
+                    <div className="sonde-map-hud-group">
+                      <p className="sonde-map-hud-label">Shadows</p>
+                      <button
+                        type="button"
+                        className={`sonde-btn sonde-btn--block ${shadowModeOn ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
+                        disabled={!apiSite}
+                        onClick={() => setShadowModeOn((v) => !v)}
+                      >
+                        Building shadows {shadowModeOn ? 'ON' : 'OFF'}
+                      </button>
+                      {shadowModeOn ? (
+                        <>
+                          <div className="sonde-map-hud-sliders">
+                            <label className="sonde-label sonde-label--precision">
+                              Day of year
+                              <input
+                                type="range"
+                                min={0}
+                                max={364}
+                                step={1}
+                                disabled={!apiSite}
+                                value={shadowDayIndex}
+                                onChange={(e) => setShadowDayIndex(Number(e.target.value))}
+                              />
+                              <span className="sonde-mono">
+                                {shadowState?.date.toLocaleDateString([], { month: 'short', day: '2-digit' }) ?? '—'}
+                              </span>
+                            </label>
+                            <label className="sonde-label sonde-label--precision">
+                              Time (sunrise → sunset)
+                              <input
+                                type="range"
+                                min={0}
+                                max={1000}
+                                step={1}
+                                disabled={!apiSite}
+                                value={shadowDayProgress}
+                                onChange={(e) => setShadowDayProgress(Number(e.target.value))}
+                              />
+                              <span className="sonde-mono">
+                                {shadowState?.sunrise.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) ?? '--:--'}–
+                                {shadowState?.sunset.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) ?? '--:--'}
+                              </span>
+                            </label>
+                          </div>
+                          <p className="sonde-hint sonde-mono sonde-map-hud-hint">
+                            {shadowState
+                              ? `${shadowState.date.toLocaleDateString([], { day: '2-digit', month: 'short' })} · ${shadowState.time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · Alt ${shadowState.altitude.toFixed(0)}° · Azi ${shadowState.azimuthFromNorth.toFixed(0)}°`
+                              : '—'}
+                          </p>
+                          <div className="sonde-map-hud-presets">
+                            <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(6, 21, 9)} disabled={!apiSite}>
+                              Sum 09:00
+                            </button>
+                            <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(6, 21, 12)} disabled={!apiSite}>
+                              Sum 12:00
+                            </button>
+                            <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(6, 21, 15)} disabled={!apiSite}>
+                              Sum 15:00
+                            </button>
+                            <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(12, 21, 9)} disabled={!apiSite}>
+                              Win 09:00
+                            </button>
+                            <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(12, 21, 12)} disabled={!apiSite}>
+                              Win 12:00
+                            </button>
+                            <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(12, 21, 15)} disabled={!apiSite}>
+                              Win 15:00
+                            </button>
+                            <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(3, 21, 12)} disabled={!apiSite}>
+                              Spr 12:00
+                            </button>
+                            <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(9, 21, 12)} disabled={!apiSite}>
+                              Aut 12:00
+                            </button>
+                            <button type="button" className="sonde-btn sonde-btn--ghost" onClick={applyShadowNow} disabled={!apiSite}>
+                              Now
+                            </button>
+                            <button type="button" className={`sonde-btn ${shadowAnimating ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`} onClick={() => setShadowAnimating(true)} disabled={!apiSite || shadowAnimating}>
+                              ▶ Play
+                            </button>
+                            <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => setShadowAnimating(false)} disabled={!shadowAnimating}>
+                              ■ Stop
+                            </button>
+                          </div>
+                          {shadowStudyData ? (
+                            <div className="sonde-map-hud-shadow-study">
+                              <h4 className="sonde-map-hud-subhead">Shadow analysis</h4>
+                              <div className="sonde-card-grid sonde-map-hud-card-grid">
+                                <article className="sonde-card">
+                                  <h4>Sunlight Hours Map</h4>
+                                  <svg id="sonde-svg-sunlight-hours" viewBox="0 0 220 220" className="sonde-svg">
+                                    <rect x="0" y="0" width="220" height="220" fill="#111" />
+                                    {shadowStudyData.cells.map((c, i) => {
+                                      const x = 110 + (c.x / Math.max(1, radiusM)) * 100
+                                      const y = 110 - (c.y / Math.max(1, radiusM)) * 100
+                                      const s = Math.max(0, Math.min(1, c.summer / 10))
+                                      const r = Math.round(255 * (1 - s))
+                                      const g = Math.round(200 * s + 30)
+                                      return <rect key={`sun-cell-${i}`} x={x - 2} y={y - 2} width={4} height={4} fill={`rgb(${r},${g},60)`} />
+                                    })}
+                                    <circle cx="110" cy="110" r="100" fill="none" stroke="#555" />
+                                  </svg>
+                                </article>
+                                <article className="sonde-card">
+                                  <h4>Shadow Range (Summer/Winter)</h4>
+                                  <svg id="sonde-svg-shadow-range-summer" viewBox="0 0 220 220" className="sonde-svg">
+                                    <rect x="0" y="0" width="220" height="220" fill="#111" />
+                                    {shadowStudyData.summerRange.map((set, k) =>
+                                      set.map((poly, i) => (
+                                        <polygon
+                                          key={`sum-${k}-${i}`}
+                                          points={poly.map((p) => `${110 + (p.x / Math.max(1, radiusM)) * 90},${110 - (p.y / Math.max(1, radiusM)) * 90}`).join(' ')}
+                                          fill={k === 0 ? '#777' : k === 1 ? '#555' : '#333'}
+                                          stroke="none"
+                                        />
+                                      ))
+                                    )}
+                                  </svg>
+                                  <svg id="sonde-svg-shadow-range-winter" viewBox="0 0 220 220" className="sonde-svg" style={{ marginTop: 6 }}>
+                                    <rect x="0" y="0" width="220" height="220" fill="#111" />
+                                    {shadowStudyData.winterRange.map((set, k) =>
+                                      set.map((poly, i) => (
+                                        <polygon
+                                          key={`win-${k}-${i}`}
+                                          points={poly.map((p) => `${110 + (p.x / Math.max(1, radiusM)) * 90},${110 - (p.y / Math.max(1, radiusM)) * 90}`).join(' ')}
+                                          fill={k === 0 ? '#777' : k === 1 ? '#555' : '#333'}
+                                          stroke="none"
+                                        />
+                                      ))
+                                    )}
+                                  </svg>
+                                </article>
+                                <article className="sonde-card">
+                                  <h4>Annual Shadow Calendar</h4>
+                                  <svg id="sonde-svg-shadow-calendar" viewBox="0 0 300 160" className="sonde-svg">
+                                    <rect x="0" y="0" width="300" height="160" fill="#111" />
+                                    {shadowStudyData.calendar.map((c) => {
+                                      const x = 20 + c.hour * 11
+                                      const y = 10 + (c.month - 1) * 12
+                                      const fill = c.state === 'night' ? '#000' : c.state === 'shadow' ? '#777' : '#f1d66a'
+                                      return <rect key={`cal-${c.month}-${c.hour}`} x={x} y={y} width={10} height={10} fill={fill} />
+                                    })}
+                                  </svg>
+                                </article>
+                                <article className="sonde-card">
+                                  <h4>Sky View Factor + Daylight</h4>
+                                  <svg id="sonde-svg-svf" viewBox="0 0 220 220" className="sonde-svg">
+                                    <rect x="0" y="0" width="220" height="220" fill="#111" />
+                                    <circle cx="110" cy="110" r="90" fill="#f1d66a" stroke="#333" />
+                                    <circle cx="110" cy="110" r={90 * (1 - shadowStudyData.svf)} fill="#1f1f1f" />
+                                    <text x="110" y="114" textAnchor="middle" fill="#fff" className="sonde-svg-text" fontSize="12">{`SVF: ${shadowStudyData.svf.toFixed(2)}`}</text>
+                                  </svg>
+                                  <div className="sonde-map-tools-grid">
+                                    <label className="sonde-label">
+                                      Window w(m)
+                                      <input type="number" value={dfWindowW} onChange={(e) => setDfWindowW(Number(e.target.value) || 0)} />
+                                    </label>
+                                    <label className="sonde-label">
+                                      Window h(m)
+                                      <input type="number" value={dfWindowH} onChange={(e) => setDfWindowH(Number(e.target.value) || 0)} />
+                                    </label>
+                                    <label className="sonde-label">
+                                      Room depth(m)
+                                      <input type="number" value={dfRoomDepth} onChange={(e) => setDfRoomDepth(Number(e.target.value) || 0)} />
+                                    </label>
+                                    <label className="sonde-label">
+                                      Obstruction °
+                                      <input type="number" value={dfObstructionDeg} onChange={(e) => setDfObstructionDeg(Number(e.target.value) || 0)} />
+                                    </label>
+                                  </div>
+                                  <p className="sonde-hint">{`Estimated Daylight Factor: ${daylightFactor.value.toFixed(2)}% · ${daylightFactor.rag === 'green' ? '🟢' : daylightFactor.rag === 'amber' ? '🟡' : '🔴'} · Nursery 3%: ${daylightFactor.nurseryPass ? 'Yes' : 'No'}`}</p>
+                                </article>
+                                <article className="sonde-card">
+                                  <h4>Solar Radiation Heatmap</h4>
+                                  <svg id="sonde-svg-solar-radiation" viewBox="0 0 220 220" className="sonde-svg">
+                                    <rect x="0" y="0" width="220" height="220" fill="#111" />
+                                    {shadowStudyData.cells.map((c, i) => {
+                                      const x = 110 + (c.x / Math.max(1, radiusM)) * 100
+                                      const y = 110 - (c.y / Math.max(1, radiusM)) * 100
+                                      const s = Math.max(0, Math.min(1, c.solar / 10))
+                                      const r = Math.round(255 * s)
+                                      const b = Math.round(220 * (1 - s))
+                                      return <rect key={`rad-cell-${i}`} x={x - 2} y={y - 2} width={4} height={4} fill={`rgb(${r},120,${b})`} />
+                                    })}
+                                  </svg>
+                                </article>
+                              </div>
+                              {shadowSummary ? (
+                                <p className="sonde-hint">
+                                  {`South facade: ${shadowSummary.southSummer.toFixed(1)}hrs sun in summer, ${shadowSummary.southWinter.toFixed(1)}hrs in winter · North facade: ${shadowSummary.northSummer.toFixed(1)}hrs summer, ${shadowSummary.northWinter.toFixed(1)}hrs winter`}
+                                </p>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </div>
+                    {treeStatus || lidarStatus || lidarProgressDetail ? (
+                      <div className="sonde-map-hud-group sonde-map-hud-diag">
+                        <p className="sonde-map-hud-label">Terrain / load</p>
+                        {treeStatus ? <p className="sonde-hint">{treeStatus}</p> : null}
+                        {lidarStatus ? <p className="sonde-hint">{lidarStatus}</p> : null}
+                        {lidarProgressDetail ? <p className="sonde-hint sonde-mono">{lidarProgressDetail}</p> : null}
+                        <p className="sonde-hint sonde-mono">
+                          {`Terrain: ${
+                            terrainDemSource === 'ea_1m'
+                              ? 'EA LiDAR 1m'
+                              : lidarEwLabel === 'loading'
+                                ? '… loading'
+                                : lidarEwLabel === 'error'
+                                  ? '✗ fetch failed'
+                                  : lidarEwLabel === 'outside'
+                                    ? 'Open-Meteo / Mapbox (no tile)'
+                                    : '—'
+                          } | LiDAR tile: ${
+                            lidarEwLabel === 'covered' ? '✓' : lidarEwLabel === 'loading' ? '…' : lidarEwLabel === 'error' ? '✗' : '—'
+                          } | Buildings: ${lidarHeightsEnabled ? 'LiDAR tile / fallback' : 'Mapbox/OSM'} | Trees: OSM + LiDAR (deduped) | Shadows: calculated | ${mapPipelineStatus} | Last updated: ${mapPipelineUpdatedAt ? mapPipelineUpdatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}`}
+                        </p>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+
+              {sectionProfile && sectionProfile.length > 1 && !mapFullscreen ? (
+                <div className="sonde-section-float">
+                  <label className="sonde-label sonde-section-float-scale">
                     Scale
                     <select value={sectionScale} onChange={(e) => setSectionScale(e.target.value as SectionScale)}>
                       <option value="1:100">1:100</option>
@@ -3005,24 +3166,70 @@ export default function App() {
                       <option value="1:1000">1:1000</option>
                     </select>
                   </label>
-                  <span className="sonde-hint">
-                    At {sectionScale} this section is {(
-                      sectionDistanceM * 1000 /
-                      (sectionScale === '1:100' ? 100 : sectionScale === '1:200' ? 200 : sectionScale === '1:500' ? 500 : 1000)
-                    ).toFixed(1)}mm wide × {(
-                      (((sectionStats?.max ?? 0) - (sectionStats?.min ?? 0)) * 1000) /
-                      (sectionScale === '1:100' ? 100 : sectionScale === '1:200' ? 200 : sectionScale === '1:500' ? 500 : 1000) +
-                      40
-                    ).toFixed(1)}mm tall on paper
-                  </span>
+                  <button type="button" className="sonde-btn sonde-btn--ghost" disabled={!sectionProfile || sectionProfile.length < 2} onClick={downloadSectionSvg}>
+                    SVG
+                  </button>
                   <button
                     type="button"
                     className="sonde-btn sonde-btn--ghost"
                     onClick={() => setSectionPreviewTheme((v) => (v === 'dark' ? 'light' : 'dark'))}
                   >
-                    {sectionPreviewTheme === 'dark' ? 'Light Export' : 'Dark Preview'}
+                    {sectionPreviewTheme === 'dark' ? 'Light export' : 'Dark preview'}
+                  </button>
+                  <button type="button" className={`sonde-btn ${sectionFlip ? 'sonde-btn--ghost' : 'sonde-btn--primary'}`} onClick={() => setSectionFlip(false)}>
+                    {`${sectionView.backward || '?'} ${sectionView.backwardArrow || ''}`}
+                  </button>
+                  <button type="button" className={`sonde-btn ${sectionFlip ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`} onClick={() => setSectionFlip(true)}>
+                    {`${sectionView.forward || '?'} ${sectionView.forwardArrow || ''}`}
                   </button>
                 </div>
+              ) : null}
+            </div>
+
+            {token ? (
+              <div className={`sonde-terrain-status sonde-mono ${terrainBarExpanded ? 'sonde-terrain-status--expanded' : ''}`}>
+                <button
+                  type="button"
+                  className="sonde-terrain-status-chevron"
+                  onClick={() => setTerrainBarExpanded((e) => !e)}
+                  aria-expanded={terrainBarExpanded}
+                  aria-label={terrainBarExpanded ? 'Collapse status' : 'Expand status'}
+                >
+                  {terrainBarExpanded ? '∧' : '∨'}
+                </button>
+                <div className="sonde-terrain-status-text" title={terrainStatusBarText}>
+                  {terrainStatusBarText}
+                </div>
+                {terrainBarExpanded ? (
+                  <div className="sonde-terrain-status-extra">
+                    <p className="sonde-hint sonde-mono">
+                      {`Terrain: ${
+                        terrainDemSource === 'ea_1m'
+                          ? 'EA LiDAR 1m'
+                          : lidarEwLabel === 'loading'
+                            ? '… loading'
+                            : lidarEwLabel === 'error'
+                              ? '✗ fetch failed'
+                              : lidarEwLabel === 'outside'
+                                ? 'Open-Meteo / Mapbox (no tile)'
+                                : '—'
+                      } | LiDAR tile: ${
+                        lidarEwLabel === 'covered' ? '✓' : lidarEwLabel === 'loading' ? '…' : lidarEwLabel === 'error' ? '✗' : '—'
+                      } | Buildings: ${lidarHeightsEnabled ? 'LiDAR tile / fallback' : 'Mapbox/OSM'} | Trees: OSM + LiDAR (deduped) | Shadows: calculated | ${mapPipelineStatus} | Last updated: ${mapPipelineUpdatedAt ? mapPipelineUpdatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}`}
+                    </p>
+                    {treeStatus ? <p className="sonde-hint">{treeStatus}</p> : null}
+                    {lidarStatus ? <p className="sonde-hint">{lidarStatus}</p> : null}
+                    {lidarProgressDetail ? <p className="sonde-hint sonde-mono">{lidarProgressDetail}</p> : null}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+
+          
+          <ModuleErrorBoundary moduleName="Section profile">
+            {!mapFullscreen && sectionProfile && sectionProfile.length > 1 ? (
+              <div className="sonde-section-chart-wrap">
                 <svg
                   id="sonde-svg-section"
                   viewBox="0 0 820 300"
@@ -3051,8 +3258,21 @@ export default function App() {
                 >
                   <rect width="100%" height="100%" fill="var(--section-bg)" />
                   <defs>
-                    <pattern id="sonde-section-hatch" width="3" height="3" patternUnits="userSpaceOnUse">
-                      <rect x="0" y="0" width="3" height="3" fill="var(--section-ground-fill)" />
+                    <pattern
+                      id="sonde-ground-diagonal"
+                      width={4 * Math.SQRT2}
+                      height={4 * Math.SQRT2}
+                      patternUnits="userSpaceOnUse"
+                      patternTransform="rotate(45)"
+                    >
+                      <line
+                        x1="0"
+                        y1="0"
+                        x2="0"
+                        y2={4 * Math.SQRT2}
+                        stroke="#333333"
+                        strokeWidth="1"
+                      />
                     </pattern>
                     <clipPath id="sonde-section-clip">
                       <rect x="52" y="12" width="752" height="236" />
@@ -3126,7 +3346,10 @@ export default function App() {
                       }
                       return workingProfile[0].elevationM
                     }
-                    const trunc = (s: string) => (s.length > 12 ? `${s.slice(0, 12)}...` : s)
+                    const shortLabel = (s: string, n = 36) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
+                    const sortedBuildings = [...sectionBuildings].sort((a, b) =>
+                      a.context === b.context ? 0 : a.context ? -1 : 1
+                    )
                     return (
                       <>
                         <rect x={left} y={top} width={width} height={height} fill="none" stroke="var(--section-axis)" strokeWidth="0.9" />
@@ -3154,24 +3377,28 @@ export default function App() {
                           )
                         })}
                         <g clipPath="url(#sonde-section-clip)">
-                        <path d={groundClosedPath} fill="#2a2a2a" stroke="none" />
-                        {sectionBuildings.map((bld, i) => {
+                        <path d={groundClosedPath} fill="#141414" stroke="none" />
+                        <path d={groundClosedPath} fill="url(#sonde-ground-diagonal)" stroke="none" />
+                        {sortedBuildings.map((bld, i) => {
                           const x1 = sectionFlip ? distToX(maxD - bld.endM) : distToX(bld.startM)
                           const x2 = sectionFlip ? distToX(maxD - bld.startM) : distToX(bld.endM)
                           const widthPx = Math.max(1, Math.abs(x2 - x1))
                           const yTop = elevToY(bld.topM)
                           const dMid = (bld.startM + bld.endM) / 2
                           const yBase = elevToY(terrainAtDist(dMid))
-                          const prevMid = i > 0 ? (sectionBuildings[i - 1].startM + sectionBuildings[i - 1].endM) / 2 : Number.NaN
-                          const closeToPrev = Number.isFinite(prevMid) && Math.abs(dMid - prevMid) < 12
-                          const alternate = closeToPrev ? i % 2 !== 0 : i % 2 === 0
-                          const yLabel = alternate ? yTop - 3 : yBase + 10
+                          const cx = (x1 + x2) / 2
                           return (
                             <g key={`bld-cut-${i}`}>
                               {bld.context ? (
-                                <>
-                                  <rect x={Math.min(x1, x2)} y={yTop} width={Math.max(1, Math.abs(x2 - x1))} height={Math.max(1, yBase - yTop)} fill="none" stroke="var(--section-context-stroke)" strokeWidth="0.5" />
-                                </>
+                                <rect
+                                  x={Math.min(x1, x2)}
+                                  y={yTop}
+                                  width={Math.max(1, Math.abs(x2 - x1))}
+                                  height={Math.max(1, yBase - yTop)}
+                                  fill="none"
+                                  stroke="#555555"
+                                  strokeWidth="0.65"
+                                />
                               ) : (
                                 <>
                                   <rect
@@ -3183,9 +3410,16 @@ export default function App() {
                                     stroke="#ffffff"
                                     strokeWidth="0.5"
                                   />
-                                  {widthPx > 40 ? (
-                                    <text x={(x1 + x2) / 2} y={Math.max(top + 8, Math.min(top + height - 6, yLabel))} textAnchor="middle" fill="#ffffff" fontSize="9" className="sonde-svg-text">
-                                      {trunc(bld.label)}
+                                  {widthPx > 30 ? (
+                                    <text
+                                      x={cx}
+                                      y={Math.max(top + 11, yTop - 3)}
+                                      textAnchor="middle"
+                                      fill="#ffffff"
+                                      fontSize="9"
+                                      className="sonde-svg-text sonde-mono"
+                                    >
+                                      {shortLabel(bld.label, 40)}
                                     </text>
                                   ) : null}
                                 </>
@@ -3193,7 +3427,15 @@ export default function App() {
                             </g>
                           )
                         })}
-                        <polyline points={points.join(' ')} fill="none" stroke="#ffffff" strokeWidth={2} />
+                        <path
+                          d={terrainPath}
+                          fill="none"
+                          stroke="#ffffff"
+                          strokeWidth={2}
+                          strokeLinejoin="round"
+                          strokeLinecap="round"
+                          vectorEffect="non-scaling-stroke"
+                        />
                         <circle cx={start.split(',')[0]} cy={start.split(',')[1]} r="3.2" fill="#E8621A" stroke="#ffffff" strokeWidth="1" />
                         <circle cx={end.split(',')[0]} cy={end.split(',')[1]} r="3.2" fill="#E8621A" stroke="#ffffff" strokeWidth="1" />
                         </g>
@@ -3263,21 +3505,8 @@ export default function App() {
                     )
                   })()}
                 </svg>
-                <div className="sonde-map-tools-row" style={{ padding: '0 0.55rem 0.55rem' }}>
-                  <button type="button" className={`sonde-btn ${sectionFlip ? 'sonde-btn--ghost' : 'sonde-btn--primary'}`} onClick={() => setSectionFlip(false)}>
-                    {`Looking ${sectionView.backward || 'Southwest'} ${sectionView.backwardArrow || '↙'}`}
-                  </button>
-                  <button type="button" className={`sonde-btn ${sectionFlip ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`} onClick={() => setSectionFlip(true)}>
-                    {`Looking ${sectionView.forward || 'Northeast'} ${sectionView.forwardArrow || '↗'}`}
-                  </button>
-                </div>
               </div>
-            ) : (
-              <p className="sonde-hint">
-                {sectionMode ? 'Section mode armed: click point A then B on the map.' : 'Use Draw Section to define a terrain cut.'}
-              </p>
-            )}
-          </section>
+            ) : null}
           </ModuleErrorBoundary>
           <section className="sonde-panel-wrap" aria-live="polite">
             {panel}

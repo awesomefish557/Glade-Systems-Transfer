@@ -20,6 +20,9 @@ GLADE_GATE_PASSWORD = "mU5/6yU"
 # DELPHI_ORIGIN = "https://delphi.gladesystems.uk"
 # Seer: /seer redirects to SEER_PAGES_ORIGIN or https://master.seer-11i.pages.dev (set in Dashboard if needed).
 # Optional vanity: attach seer.gladesystems.uk on the Seer Pages project, then set SEER_PAGES_ORIGIN=https://seer.gladesystems.uk
+# Bookies: /bookies proxies to BOOKIES_ORIGIN or defaults to https://bookies-ui.pages.dev
+# Example override:
+# BOOKIES_ORIGIN = "https://convertor-release.bookies-ui.pages.dev"
 
 # Local dev: router/.dev.vars overrides [vars] for `wrangler dev` (see .dev.vars.example).
 # You can also set or override CONVERTOR_ORIGIN in the dashboard: Workers → glade-router → Settings → Variables.

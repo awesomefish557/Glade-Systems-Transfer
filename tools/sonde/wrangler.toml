@@ -1,9 +1,17 @@
 # Cloudflare Pages — Sonde
 # Dashboard: project name "sonde", root directory tools/sonde, build npm run build, output dist
-# Environment variables (Production + Preview): ANTHROPIC_API_KEY (secret) for /anthropic-api proxy in public/_worker.js
+# Advanced mode: `public/_worker.js` (copied to dist) handles /proxy, /anthropic-api, /overpass-cache, /site.
+# `functions/*.ts` is not auto-mounted alongside _worker.js — mirror changes in _worker.js.
+# Environment variables (Production + Preview): ANTHROPIC_API_KEY (secret) for /anthropic-api.
 #
 # Share URL /site?… is rewritten in public/_worker.js (Pages advanced mode). Wrangler does not support [[redirects]] here;
 # public/_redirects is also present for documentation / any static-only mirror of the rule.
 name = "sonde"
 pages_build_output_dir = "dist"
 compatibility_date = "2025-04-01"
+
+# Overpass JSON cache (7-day TTL) — used by functions/overpass-cache.ts
+# Create another namespace: wrangler kv namespace create SONDE_CACHE
+[[kv_namespaces]]
+binding = "SONDE_CACHE"
+id = "4fcd1d36dcd944f8abdf7efe15b2248d"

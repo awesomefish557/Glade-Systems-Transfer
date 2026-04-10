@@ -1,4 +1,12 @@
-import { type Opportunity, MIN_VOLUME_USD } from "./analysis";
+import {
+  type AerHoldWarning,
+  type Opportunity,
+  type SuggestedStakeTier,
+  aerHoldWarningFromDays,
+  aerWarningLevelFromDays,
+  getTieredSuggestedStake,
+  MIN_VOLUME_USD
+} from "./analysis";
 
 export interface Env {
   DB: D1Database;
@@ -327,7 +335,21 @@ export type StoredOpportunity = {
   marketProbability: number;
   signals: string[];
   computedAt: string;
+  aerHoldWarning?: AerHoldWarning;
+  aerWarning?: "amber" | "red";
+  tieredStakeFraction: number;
+  suggestedStakeTier: SuggestedStakeTier;
+  /** Set by GET /api/opportunities when joined to open positions. */
+  hasOpenPosition?: boolean;
+  openPositionDirection?: "YES" | "NO" | null;
 };
+
+function layerForTieredStake(layer: string): "1" | "2" | "3" {
+  const t = layer.trim();
+  if (t === "1") return "1";
+  if (t === "3") return "3";
+  return "2";
+}
 
 export async function listStoredOpportunities(
   db: D1Database
@@ -359,24 +381,37 @@ export async function listStoredOpportunities(
       computed_at: string;
     }>();
 
-  return results.map((r) => ({
-    marketId: r.market_id,
-    question: r.question,
-    category: r.category,
-    direction: r.direction,
-    currentPrice: r.current_price,
-    daysToResolution: r.days_to_resolution,
-    aer: r.aer,
-    timeToDouble: r.time_to_double,
-    psychologyScore: r.psychology_score,
-    layer: r.layer,
-    kellyFraction: r.kelly_fraction,
-    suggestedStake: r.suggested_stake,
-    calibratedProbability: r.calibrated_probability,
-    marketProbability: r.market_probability,
-    signals: safeParseSignals(r.signals_json),
-    computedAt: r.computed_at
-  }));
+  return results.map((r) => {
+    const w = aerHoldWarningFromDays(r.days_to_resolution);
+    const aw = aerWarningLevelFromDays(r.days_to_resolution);
+    const tiered = getTieredSuggestedStake(1, {
+      daysToResolution: r.days_to_resolution,
+      currentPrice: r.current_price,
+      layer: layerForTieredStake(r.layer)
+    });
+    return {
+      marketId: r.market_id,
+      question: r.question,
+      category: r.category,
+      direction: r.direction,
+      currentPrice: r.current_price,
+      daysToResolution: r.days_to_resolution,
+      aer: r.aer,
+      timeToDouble: r.time_to_double,
+      psychologyScore: r.psychology_score,
+      layer: r.layer,
+      kellyFraction: r.kelly_fraction,
+      suggestedStake: r.suggested_stake,
+      tieredStakeFraction: tiered.stake,
+      suggestedStakeTier: tiered.tier,
+      calibratedProbability: r.calibrated_probability,
+      marketProbability: r.market_probability,
+      signals: safeParseSignals(r.signals_json),
+      computedAt: r.computed_at,
+      ...(w ? { aerHoldWarning: w } : {}),
+      ...(aw ? { aerWarning: aw } : {})
+    };
+  });
 }
 
 function safeParseSignals(json: string): string[] {
@@ -425,6 +460,52 @@ export async function getMarketForPosition(
       question: string;
     }>();
   return row ?? null;
+}
+
+/** Count OPEN rows for same market + direction (duplicate guard). */
+export async function countOpenPositionsForMarketAndDirection(
+  db: D1Database,
+  marketId: string,
+  direction: "YES" | "NO"
+): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM positions
+       WHERE CAST(market_id AS TEXT) = CAST(? AS TEXT)
+         AND UPPER(TRIM(direction)) = UPPER(?)
+         AND status = 'OPEN'`
+    )
+    .bind(marketId, direction)
+    .first<{ c: number }>();
+  return Number(row?.c ?? 0);
+}
+
+/** True if an OPEN row exists for this market and direction (paper or live). */
+export async function hasOpenPositionForMarketAndDirection(
+  db: D1Database,
+  marketId: string,
+  direction: "YES" | "NO"
+): Promise<boolean> {
+  return (await countOpenPositionsForMarketAndDirection(db, marketId, direction)) > 0;
+}
+
+/** First OPEN direction per market_id (for opportunities placement hints). */
+export async function listOpenPositionsMarketDirections(
+  db: D1Database
+): Promise<Map<string, "YES" | "NO">> {
+  const { results = [] } = await db
+    .prepare(
+      `SELECT market_id, direction FROM positions WHERE status = 'OPEN'`
+    )
+    .all<{ market_id: string; direction: string }>();
+  const m = new Map<string, "YES" | "NO">();
+  for (const r of results) {
+    const id = String(r.market_id);
+    if (m.has(id)) continue;
+    const d = String(r.direction ?? "").trim().toUpperCase();
+    m.set(id, d === "NO" ? "NO" : "YES");
+  }
+  return m;
 }
 
 export type InsertOpenPositionParams = {

@@ -1,5 +1,13 @@
 export type TradeMode = "paper" | "live";
 
+export type AerHoldWarning = {
+  severity: "amber" | "red";
+  message: string;
+};
+
+/** Tiered stake band from worker (0 = L2/L3 1% cap). */
+export type SuggestedStakeTier = 0 | 1 | 2 | 3 | 4;
+
 export interface Opportunity {
   marketId: string;
   question: string;
@@ -13,10 +21,16 @@ export interface Opportunity {
   layer: string;
   kellyFraction: number;
   suggestedStake: number;
+  tieredStakeFraction?: number;
+  suggestedStakeTier?: SuggestedStakeTier;
   calibratedProbability: number;
   marketProbability: number;
   signals: string[];
   computedAt: string;
+  aerHoldWarning?: AerHoldWarning;
+  aerWarning?: "amber" | "red";
+  hasOpenPosition?: boolean;
+  openPositionDirection?: "YES" | "NO" | null;
 }
 
 export interface Position {
@@ -59,6 +73,10 @@ export interface PortfolioStats {
   openPositionsCount?: number;
   totalAtRisk: number;
   resolvedClosedCount?: number;
+  liveAerBlended?: number | null;
+  avgHoldDaysClosed?: number | null;
+  liveAerTrend?: "improving" | "stable" | "declining" | null;
+  backtestStrategyBTarget?: number;
   ukTaxYear: { start: string; end: string };
 }
 
@@ -188,7 +206,12 @@ export type LiveOpportunityRow = {
   psychologyScore: number;
   signals: string[];
   suggestedStake: number;
+  layer?: string;
+  kellyFraction?: number;
+  tieredStakeFraction?: number;
+  suggestedStakeTier?: SuggestedStakeTier;
   platformComparison?: LivePlatformComparison | null;
+  aerHoldWarning?: AerHoldWarning;
 };
 
 export type LiveArbitrageRow = {
@@ -242,7 +265,10 @@ export type TradingOpportunityRow = {
   category: string;
   computedAt: string;
   suggestedStake: number;
+  tieredStakeFraction?: number;
+  suggestedStakeTier?: SuggestedStakeTier;
   platformComparison?: LivePlatformComparison | null;
+  aerHoldWarning?: AerHoldWarning;
 };
 
 export type BacktestStrategyResult = {

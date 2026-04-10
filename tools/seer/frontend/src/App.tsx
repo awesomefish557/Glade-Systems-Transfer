@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { fetchJson } from "./api";
 import BacktestPanel from "./components/BacktestPanel";
+import HomeOpportunitiesSection from "./components/HomeOpportunitiesSection";
 import LiveOpportunities from "./components/LiveOpportunities";
 import PortfolioDashboard from "./components/PortfolioDashboard";
+import SettingsPanel from "./components/SettingsPanel";
 import type { LiveOpportunitiesResponse } from "./types";
 import { formatCompactVolume } from "./utils";
 
@@ -17,6 +19,7 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("home");
   const [stats, setStats] = useState<HeaderStats | null>(null);
   const [statsErr, setStatsErr] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const refreshStats = useCallback(async () => {
     try {
@@ -43,7 +46,18 @@ export default function App() {
     <div className="app-shell">
       <header className="app-header">
         <div className="app-header-row">
-          <h1 className="app-title">Seer</h1>
+          <div className="app-title-row">
+            <h1 className="app-title">Seer</h1>
+            <button
+              type="button"
+              className="header-icon-btn header-icon-btn--gear"
+              onClick={() => setSettingsOpen(true)}
+              aria-label="Settings"
+              title="Settings"
+            >
+              ⚙
+            </button>
+          </div>
           <nav className="app-nav" aria-label="Primary">
             {(
               [
@@ -102,6 +116,7 @@ export default function App() {
               </p>
             </section>
             <PortfolioDashboard />
+            <HomeOpportunitiesSection active={tab === "home"} />
           </>
         )}
         {tab === "trading" && <LiveOpportunities />}
@@ -112,6 +127,7 @@ export default function App() {
         )}
         {tab === "backtest" && <BacktestPanel />}
       </main>
+      <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

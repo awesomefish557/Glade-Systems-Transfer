@@ -35,7 +35,34 @@ import { useSolarData } from './hooks/useSolarData'
 import { useWindData } from './hooks/useWindData'
 import { getOverpassSourceStatus, subscribeOverpassSource } from './utils/overpass'
 import { azimuthSouthToNorthDeg } from './utils/sunCalc'
-import type { ModuleId, SavedSite, SiteLocation, StatusTone } from './types'
+import { fetchEgmsPointsFeatureCollection } from './utils/egms'
+import {
+  EA_LIDAR_DSM_EXPORT,
+  EA_LIDAR_DTM_EXPORT,
+  extractLidarTrees,
+  fetchEaLidarTiff,
+  fetchDemGridForBounds,
+  fetchOpenTopoGlobaldemTiff,
+  isEuropeCop30Coverage,
+  isEwLidarCoverage,
+  logLidarCoverageCheck,
+  LIDAR_CACHE_MS,
+  lidarTileCacheKey,
+  loadCachedTiff,
+  metricsFromLidarGrids,
+  openTopoCacheKey,
+  parseEaLidarTiff,
+  saveCachedTiff,
+  sampleOpenMeteoElevations,
+  sectionElevationsFromLidar,
+  siteToTileZ14,
+  slopeGeoJsonFromGrid,
+  terrainContoursOsStyle,
+  terrainCoverageSummary,
+  tileBoundsWgs84,
+  type LidarElevationGrid,
+} from './utils/lidarTerrain'
+import type { ModuleId, OSMTree, SavedSite, SiteLocation, StatusTone } from './types'
 
 const MODULES: { id: ModuleId; label: string }[] = [
   { id: 'solar', label: 'Solar' },
@@ -76,13 +103,22 @@ const ROOF_CONTOUR_SOURCE_ID = 'sonde-roof-contours'
 const ROOF_CONTOUR_LAYER_ID = 'sonde-roof-contours-line'
 const HISTORICAL_SOURCE_ID = 'sonde-historical-source'
 const HISTORICAL_LAYER_ID = 'sonde-historical-layer'
+const LIDAR_TERRAIN_CONTOUR_SOURCE_ID = 'sonde-lidar-terrain-contours'
+const LIDAR_TERRAIN_CONTOUR_LAYER_ID = 'sonde-lidar-terrain-contours-line'
+const EGMS_HEATMAP_SOURCE_ID = 'sonde-egms-points'
+const EGMS_HEATMAP_LAYER_ID = 'sonde-subsidence-heatmap'
+const SLOPE_SOURCE_ID = 'sonde-slope-grid'
+const SLOPE_LAYER_ID = 'sonde-slope-fill'
 const SAVED_SITES_KEY = 'sonde_saved_sites'
-const BASIC_3D_BUILDINGS_ONLY = true
+const BASIC_3D_BUILDINGS_ONLY = false
+/** Map default: UK overview; default pin at UK centre until user clears (0,0) or picks elsewhere. apiSite is null when lat/lng are 0. */
+const UK_CENTER: [number, number] = [-2.5, 53.5]
+const UK_ZOOM = 5.5
 const DEFAULT_SITE: SiteLocation = {
-  lat: 51.4914,
-  lng: -3.1819,
-  name: 'Lidl Maindy Road',
-  address: 'Lidl, Maindy Road, Cardiff CF24 4HQ',
+  lat: 53.5,
+  lng: -2.5,
+  name: '',
+  address: '',
 }
 
 function clamp(n: number, min: number, max: number): number {
@@ -113,6 +149,15 @@ function haversineM(aLat: number, aLng: number, bLat: number, bLng: number): num
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
     Math.cos(a0) * Math.cos(b0) * Math.sin(dLng / 2) * Math.sin(dLng / 2)
   return 2 * R * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h))
+}
+
+function mergeOsmAndLidarTrees(osmTrees: OSMTree[], lidarTrees: OSMTree[], dedupeM = 5): OSMTree[] {
+  const out = [...osmTrees]
+  for (const lt of lidarTrees) {
+    const dup = out.some((t) => haversineM(t.lat, t.lng, lt.lat, lt.lng) < dedupeM)
+    if (!dup) out.push(lt)
+  }
+  return out
 }
 
 function pointInPolygon(point: [number, number], ring: [number, number][]): boolean {
@@ -264,7 +309,7 @@ function toneForModule(
   ecology: ReturnType<typeof useEcologyData>,
   built: ReturnType<typeof useBuiltEnvironmentData>
 ): StatusTone {
-  if (!site) return 'amber'
+  if (!site || (site.lat === 0 && site.lng === 0)) return 'amber'
   switch (id) {
     case 'solar':
       return 'green'
@@ -405,6 +450,16 @@ export default function App() {
   const [lidarHeightsEnabled, setLidarHeightsEnabled] = useState(true)
   const [treeStatus, setTreeStatus] = useState('')
   const [lidarStatus, setLidarStatus] = useState('')
+  const [lidarDtmGrid, setLidarDtmGrid] = useState<LidarElevationGrid | null>(null)
+  const [lidarDsmGrid, setLidarDsmGrid] = useState<LidarElevationGrid | null>(null)
+  const [lidarEwLabel, setLidarEwLabel] = useState<'idle' | 'loading' | 'covered' | 'outside' | 'error'>('idle')
+  const [terrainDemSource, setTerrainDemSource] = useState<'none' | 'ea_1m' | 'eu_25m' | 'srtm_30m'>('none')
+  const [egmsHeatmapOn, setEgmsHeatmapOn] = useState(false)
+  const [slopeOverlayOn, setSlopeOverlayOn] = useState(false)
+  const [lidarProgressDetail, setLidarProgressDetail] = useState('')
+  const lidarDtmGridRef = useRef<LidarElevationGrid | null>(null)
+  const lidarBuildingsBatchKeyRef = useRef<string>('')
+  const lidarFetchAbortRef = useRef<AbortController | null>(null)
   const [mapPipelineStatus, setMapPipelineStatus] = useState('Loading: buildings… trees… shadows…')
   const [mapPipelineUpdatedAt, setMapPipelineUpdatedAt] = useState<Date | null>(null)
   const [showBusStops, setShowBusStops] = useState(false)
@@ -413,6 +468,10 @@ export default function App() {
   const [historicalEnabled, setHistoricalEnabled] = useState(false)
   const [historicalYear, setHistoricalYear] = useState<'1890' | '1950' | 'modern'>('modern')
   const [historicalOpacity, setHistoricalOpacity] = useState(0.45)
+  const [mapHudOpen, _setMapHudOpen] = useState(false)
+  const [mapFullscreen, _setMapFullscreen] = useState(false)
+  const [_terrainBarExpanded, _setTerrainBarExpanded] = useState(false)
+  const [shadowModeOn, _setShadowModeOn] = useState(true)
   const [claudeStatus, setClaudeStatus] = useState<ServiceStatus>('loading')
   const urlSiteAppliedRef = useRef(false)
 
@@ -422,12 +481,343 @@ export default function App() {
   const climate = useClimateData(apiSite)
   const flood = useFloodData(apiSite, 5)
   const ground = useGroundData(apiSite, 0)
+  const terrainStatusBarText = useMemo(() => {
+    const terrainLine =
+      terrainDemSource === 'ea_1m'
+        ? 'LiDAR 1m (EA 2022) ✓'
+        : terrainDemSource === 'eu_25m'
+          ? 'EU DEM 25m (COP30) ✓'
+          : terrainDemSource === 'srtm_30m'
+            ? 'SRTM 30m ✓'
+            : lidarEwLabel === 'loading'
+              ? 'Terrain …'
+              : 'Open-Meteo / Mapbox ✓'
+    const coverage = apiSite ? terrainCoverageSummary(apiSite.lat, apiSite.lng) : '—'
+    let move = 'Movement unavailable'
+    if (ground.status === 'loading') move = 'Movement …'
+    if (ground.status === 'ok') {
+      const mm = ground.data.movementMeanMmYr
+      if (mm != null) move = `EGMS ${mm.toFixed(1)} mm/yr ✓`
+    }
+    const bld =
+      terrainDemSource === 'ea_1m' && lidarHeightsEnabled
+        ? 'LiDAR heights ✓'
+        : lidarHeightsEnabled
+          ? 'OSM + spot LiDAR ✓'
+          : 'OSM estimated'
+    return `Terrain: ${terrainLine} | ${coverage} | ${move} | Buildings: ${bld}`
+  }, [terrainDemSource, lidarEwLabel, apiSite, ground, lidarHeightsEnabled])
+
   const planning = usePlanningData(apiSite)
   const demographics = useDemographicsData(apiSite)
   const movement = useMovementData(apiSite)
   const ecology = useEcologyData(apiSite)
   const built = useBuiltEnvironmentData(apiSite)
   const osm = useOSMData(apiSite, radiusM)
+
+  const lidarDerivedTreeExtras = useMemo(() => {
+    if (!lidarDtmGrid || !lidarDsmGrid || osm.status !== 'ok' || !osm.data) return [] as OSMTree[]
+    const rings = osm.data.buildings
+      .map((b) => b.rings[0])
+      .filter((r): r is [number, number][] => !!r && r.length >= 3)
+    const raw = extractLidarTrees(lidarDtmGrid, lidarDsmGrid, rings, 2)
+    return raw.slice(0, 96).map((t, i) => ({
+      id: `lidar-tree-${i}-${t.lat.toFixed(5)}`,
+      lat: t.lat,
+      lng: t.lng,
+      height: t.heightM,
+      crownDiameter: Math.min(40, t.crownDiameterM),
+      leafCycle: 'unknown' as const,
+      leafType: 'unknown' as const,
+    }))
+  }, [lidarDtmGrid, lidarDsmGrid, osm])
+
+  useEffect(() => {
+    lidarDtmGridRef.current = lidarDtmGrid
+  }, [lidarDtmGrid])
+
+  useEffect(() => {
+    if (!apiSite) {
+      lidarFetchAbortRef.current?.abort()
+      setLidarDtmGrid(null)
+      setLidarDsmGrid(null)
+      setLidarEwLabel('idle')
+      setTerrainDemSource('none')
+      setLidarProgressDetail('')
+      lidarBuildingsBatchKeyRef.current = ''
+      return
+    }
+    logLidarCoverageCheck(apiSite.lat, apiSite.lng)
+    const ac = new AbortController()
+    lidarFetchAbortRef.current?.abort()
+    lidarFetchAbortRef.current = ac
+    let cancelled = false
+    ;(async () => {
+      setLidarEwLabel('loading')
+      setTerrainDemSource('none')
+      setLidarProgressDetail('Loading terrain raster…')
+      const { z, x, y } = siteToTileZ14(apiSite.lat, apiSite.lng)
+      const bbox = tileBoundsWgs84(z, x, y)
+      const [west, south, east, north] = bbox
+
+      const failTerrain = (msg: string) => {
+        if (cancelled) return
+        setLidarEwLabel('error')
+        setTerrainDemSource('none')
+        setLidarDtmGrid(null)
+        setLidarDsmGrid(null)
+        setLidarProgressDetail(msg)
+      }
+
+      try {
+        if (isEwLidarCoverage(apiSite.lat, apiSite.lng)) {
+          const kDtm = lidarTileCacheKey('dtm', z, x, y)
+          const kDsm = lidarTileCacheKey('dsm', z, x, y)
+          let bufDtm = await loadCachedTiff(kDtm)
+          if (!bufDtm) {
+            bufDtm = await fetchEaLidarTiff(EA_LIDAR_DTM_EXPORT, bbox, ac.signal, 'dtm')
+            saveCachedTiff(kDtm, bufDtm)
+          }
+          if (cancelled) return
+          const dtm = await parseEaLidarTiff(bufDtm)
+          setLidarDtmGrid(dtm)
+          setLidarProgressDetail('Loading EA LiDAR DSM…')
+
+          let bufDsm = await loadCachedTiff(kDsm)
+          if (!bufDsm) {
+            bufDsm = await fetchEaLidarTiff(EA_LIDAR_DSM_EXPORT, bbox, ac.signal, 'dsm')
+            saveCachedTiff(kDsm, bufDsm)
+          }
+          if (cancelled) return
+          const dsm = await parseEaLidarTiff(bufDsm)
+          setLidarDsmGrid(dsm)
+          setLidarEwLabel('covered')
+          setTerrainDemSource('ea_1m')
+          setLidarProgressDetail('LiDAR terrain ready ✓ · roof detection running…')
+          return
+        }
+
+        if (isEuropeCop30Coverage(apiSite.lat, apiSite.lng)) {
+          setLidarProgressDetail('Loading EU DEM (COP30 via OpenTopography)…')
+          const key = openTopoCacheKey('COP30', west, south, east, north)
+          let buf = await loadCachedTiff(key)
+          if (!buf) {
+            buf = await fetchOpenTopoGlobaldemTiff('COP30', west, south, east, north, ac.signal)
+            saveCachedTiff(key, buf)
+          }
+          if (cancelled) return
+          const dtm = await parseEaLidarTiff(buf)
+          setLidarDtmGrid(dtm)
+          setLidarDsmGrid(null)
+          setLidarEwLabel('covered')
+          setTerrainDemSource('eu_25m')
+          setLidarProgressDetail('EU DEM (~25 m) ready ✓ · DSM / trees from OSM only in this zone')
+          return
+        }
+
+        setLidarProgressDetail('Loading SRTM (OpenTopography)…')
+        const sKey = openTopoCacheKey('SRTMGL1', west, south, east, north)
+        let sBuf = await loadCachedTiff(sKey)
+        if (!sBuf) {
+          sBuf = await fetchOpenTopoGlobaldemTiff('SRTMGL1', west, south, east, north, ac.signal)
+          saveCachedTiff(sKey, sBuf)
+        }
+        if (cancelled) return
+        const sDtm = await parseEaLidarTiff(sBuf)
+        setLidarDtmGrid(sDtm)
+        setLidarDsmGrid(null)
+        setLidarEwLabel('covered')
+        setTerrainDemSource('srtm_30m')
+        setLidarProgressDetail('SRTM (~30 m) ready ✓ · DSM / trees from OSM only')
+      } catch {
+        failTerrain('Terrain raster failed — section will use Open-Meteo / Mapbox')
+      }
+    })()
+    return () => {
+      cancelled = true
+      ac.abort()
+    }
+    /* Coordinate-based fetch only; avoid re-running when unrelated `site` fields change. */
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- apiSite.lat/lng are the intended trigger
+  }, [apiSite?.lat, apiSite?.lng])
+
+  useEffect(() => {
+    if (BASIC_3D_BUILDINGS_ONLY) return
+    if (!lidarDtmGrid || !lidarDsmGrid || !apiSite || osm.status !== 'ok' || !osm.data || !lidarHeightsEnabled) return
+    const { z, x, y } = siteToTileZ14(apiSite.lat, apiSite.lng)
+    const batchKey = `${z}_${x}_${y}`
+    if (lidarBuildingsBatchKeyRef.current === batchKey) return
+    const buildings = osm.data.buildings
+      .filter((b) => {
+        const ring = b.rings[0]
+        if (!ring || !ring.length) return false
+        const c = centroidLatLng(ring)
+        return haversineM(apiSite.lat, apiSite.lng, c.lat, c.lng) <= 200
+      })
+      .slice(0, 40)
+    if (!buildings.length) {
+      lidarBuildingsBatchKeyRef.current = batchKey
+      setLidarProgressDetail('LiDAR terrain ready ✓')
+      return
+    }
+    const nextHeights: Record<string, number> = {}
+    const nextLidar: Record<string, LidarBuildingData> = {}
+    let done = 0
+    for (const b of buildings) {
+      const ring = b.rings[0]
+      if (!ring || ring.length < 3) continue
+      const c = centroidLatLng(ring)
+      const key = buildingHeightKey(c.lat, c.lng)
+      const metrics = metricsFromLidarGrids(lidarDtmGrid, lidarDsmGrid, ring as [number, number][])
+      if (!metrics) continue
+      done += 1
+      const lidarData: LidarBuildingData = {
+        buildingId: b.id ?? key,
+        footprint: ring.map(([rLat, rLng]) => [rLng, rLat]),
+        lidarGrid: {
+          width: 1,
+          height: 1,
+          resolution: 1,
+          dsm: [metrics.meanDsmInside],
+          dtm: [metrics.meanDtmEdge],
+          roofHeights: [metrics.heightM],
+        },
+        contours: [{ elevation: 0.5, path: ring.map(([rLat, rLng]) => [rLng, rLat]) }],
+        maxHeight: metrics.heightM,
+        roofType: metrics.roofType,
+      }
+      nextHeights[key] = metrics.heightM
+      nextLidar[key] = lidarData
+      const cacheKey = `sonde_lidar_${key}`
+      try {
+        localStorage.setItem(
+          cacheKey,
+          JSON.stringify({ expiresAt: Date.now() + LIDAR_CACHE_MS, data: lidarData })
+        )
+      } catch {
+        /* ignore */
+      }
+    }
+    setLidarHeightsByKey((prev) => ({ ...prev, ...nextHeights }))
+    setLidarByBuilding((prev) => ({ ...prev, ...nextLidar }))
+    lidarBuildingsBatchKeyRef.current = batchKey
+    setLidarProgressDetail(
+      done > 0
+        ? `LiDAR terrain ready ✓ · Building heights: ${done}/${buildings.length} ✓ · Roof detection: done`
+        : 'LiDAR terrain ready ✓ · no building footprints in tile'
+    )
+  }, [lidarDtmGrid, lidarDsmGrid, apiSite, osm, lidarHeightsEnabled])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !mapLoaded) return
+    if (!lidarDtmGrid || !apiSite) {
+      if (map.getLayer(LIDAR_TERRAIN_CONTOUR_LAYER_ID)) map.removeLayer(LIDAR_TERRAIN_CONTOUR_LAYER_ID)
+      if (map.getSource(LIDAR_TERRAIN_CONTOUR_SOURCE_ID)) map.removeSource(LIDAR_TERRAIN_CONTOUR_SOURCE_ID)
+      return
+    }
+    const features = terrainContoursOsStyle(lidarDtmGrid, apiSite.lat, apiSite.lng)
+    const fc: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: features as GeoJSON.Feature[] }
+    if (!map.getSource(LIDAR_TERRAIN_CONTOUR_SOURCE_ID)) {
+      map.addSource(LIDAR_TERRAIN_CONTOUR_SOURCE_ID, { type: 'geojson', data: fc })
+      map.addLayer({
+        id: LIDAR_TERRAIN_CONTOUR_LAYER_ID,
+        type: 'line',
+        source: LIDAR_TERRAIN_CONTOUR_SOURCE_ID,
+        minzoom: 12,
+        paint: {
+          'line-color': ['match', ['get', 'kind'], 'index', '#888888', '#aaaaaa'],
+          'line-width': ['match', ['get', 'kind'], 'index', 0.8, 0.35],
+          'line-opacity': 0.72,
+        },
+      })
+    } else {
+      ;(map.getSource(LIDAR_TERRAIN_CONTOUR_SOURCE_ID) as mapboxgl.GeoJSONSource).setData(fc)
+    }
+  }, [mapLoaded, lidarDtmGrid, apiSite?.lat, apiSite?.lng])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !mapLoaded) return
+    if (!lidarDtmGrid || !apiSite || !slopeOverlayOn) {
+      if (map.getLayer(SLOPE_LAYER_ID)) map.removeLayer(SLOPE_LAYER_ID)
+      if (map.getSource(SLOPE_SOURCE_ID)) map.removeSource(SLOPE_SOURCE_ID)
+      return
+    }
+    const fc = slopeGeoJsonFromGrid(lidarDtmGrid, apiSite.lat, apiSite.lng, 500, 3)
+    if (!map.getSource(SLOPE_SOURCE_ID)) {
+      map.addSource(SLOPE_SOURCE_ID, { type: 'geojson', data: fc })
+      map.addLayer({
+        id: SLOPE_LAYER_ID,
+        type: 'fill',
+        source: SLOPE_SOURCE_ID,
+        minzoom: 13,
+        paint: {
+          'fill-color': ['get', 'color'],
+          'fill-opacity': 0.85,
+          'fill-outline-color': 'rgba(0,0,0,0.15)',
+        },
+      })
+    } else {
+      ;(map.getSource(SLOPE_SOURCE_ID) as mapboxgl.GeoJSONSource).setData(fc)
+    }
+  }, [mapLoaded, lidarDtmGrid, apiSite?.lat, apiSite?.lng, slopeOverlayOn])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !mapLoaded) return
+    if (!apiSite || !egmsHeatmapOn) {
+      if (map.getLayer(EGMS_HEATMAP_LAYER_ID)) map.removeLayer(EGMS_HEATMAP_LAYER_ID)
+      if (map.getSource(EGMS_HEATMAP_SOURCE_ID)) map.removeSource(EGMS_HEATMAP_SOURCE_ID)
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      const fc = await fetchEgmsPointsFeatureCollection(apiSite.lat, apiSite.lng, 500)
+      if (cancelled || !mapRef.current) return
+      const m = mapRef.current
+      if (!m.getSource(EGMS_HEATMAP_SOURCE_ID)) {
+        m.addSource(EGMS_HEATMAP_SOURCE_ID, { type: 'geojson', data: fc })
+        m.addLayer({
+          id: EGMS_HEATMAP_LAYER_ID,
+          type: 'heatmap',
+          source: EGMS_HEATMAP_SOURCE_ID,
+          maxzoom: 19,
+          paint: {
+            'heatmap-weight': [
+              'interpolate',
+              ['linear'],
+              ['abs', ['get', 'mean_velocity']],
+              0,
+              0,
+              5,
+              1,
+            ],
+            'heatmap-color': [
+              'interpolate',
+              ['linear'],
+              ['heatmap-density'],
+              0,
+              'rgba(0,80,255,0)',
+              0.35,
+              'rgba(255,255,0,0.55)',
+              0.65,
+              'rgba(255,120,0,0.75)',
+              1,
+              'rgba(255,0,0,0.85)',
+            ],
+            'heatmap-radius': 22,
+            'heatmap-opacity': 0.62,
+          },
+        })
+      } else {
+        ;(m.getSource(EGMS_HEATMAP_SOURCE_ID) as mapboxgl.GeoJSONSource).setData(fc)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [mapLoaded, apiSite?.lat, apiSite?.lng, egmsHeatmapOn])
 
   useEffect(() => {
     try {
@@ -455,8 +845,10 @@ export default function App() {
     const map = new mapboxgl.Map({
       container: mapEl.current,
       style: 'mapbox://styles/mapbox/dark-v11',
-      center: [-3.1819, 51.4914],
-      zoom: 15,
+      center: UK_CENTER,
+      zoom: UK_ZOOM,
+      pitch: 0,
+      bearing: 0,
     })
     map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), 'top-right')
     map.on('load', () => {
@@ -527,20 +919,6 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (!mapLoaded) return
-    const p = new URLSearchParams(window.location.search)
-    const lat = Number(p.get('lat'))
-    const lng = Number(p.get('lng'))
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return
-    const zoom = Number(p.get('zoom') ?? '15')
-    mapRef.current?.flyTo({
-      center: [lng, lat],
-      zoom: Number.isFinite(zoom) ? zoom : 15,
-      essential: true,
-    })
-  }, [mapLoaded])
-
-  useEffect(() => {
     let cancelled = false
     const ctrl = new AbortController()
     const timeout = window.setTimeout(() => ctrl.abort(), 7000)
@@ -580,6 +958,12 @@ export default function App() {
     setSite(s)
     const map = mapRef.current
     if (!map) return
+    if (s.lat === 0 && s.lng === 0) {
+      markerRef.current?.remove()
+      markerRef.current = null
+      map.flyTo({ center: UK_CENTER, zoom: UK_ZOOM, pitch: 0, bearing: 0, essential: true })
+      return
+    }
     if (!markerRef.current) {
       markerRef.current = new mapboxgl.Marker({ color: '#E8621A' })
         .setLngLat([s.lng, s.lat])
@@ -587,18 +971,26 @@ export default function App() {
     } else {
       markerRef.current.setLngLat([s.lng, s.lat])
     }
+    map.flyTo({
+      center: [s.lng, s.lat],
+      zoom: 15,
+      pitch: 0,
+      bearing: 0,
+      essential: true,
+      duration: 1100,
+    })
   }, [])
 
   const saveCurrentSite = useCallback(() => {
-    if (!site) return
-    const id = siteId(site.lat, site.lng)
+    if (!apiSite) return
+    const id = siteId(apiSite.lat, apiSite.lng)
     const now = new Date().toISOString()
     const nextItem: SavedSite = {
       id,
-      name: site.name || `${site.address}`,
-      address: site.address,
-      lat: site.lat,
-      lng: site.lng,
+      name: apiSite.name || `${apiSite.address}`,
+      address: apiSite.address,
+      lat: apiSite.lat,
+      lng: apiSite.lng,
       savedAt: now,
       notes: '',
       files: [],
@@ -621,7 +1013,7 @@ export default function App() {
       : [nextItem, ...savedSites]
     persistSavedSites(next)
     setSavedSitesOpen(true)
-  }, [site, savedSites, persistSavedSites, ground])
+  }, [apiSite, savedSites, persistSavedSites, ground])
 
   const updateSavedSite = useCallback((id: string, patch: Partial<SavedSite>) => {
     persistSavedSites(savedSites.map((s) => (s.id === id ? { ...s, ...patch } : s)))
@@ -643,29 +1035,29 @@ export default function App() {
   }, [onSite])
 
   const recordExportedFile = useCallback((filename: string) => {
-    if (!site) return
-    const id = siteId(site.lat, site.lng)
+    if (!apiSite) return
+    const id = siteId(apiSite.lat, apiSite.lng)
     const current = savedSites.find((s) => s.id === id)
     if (!current) return
     if (current.files.includes(filename)) return
     updateSavedSite(id, { files: [...current.files, filename] })
-  }, [site, savedSites, updateSavedSite])
+  }, [apiSite, savedSites, updateSavedSite])
 
   const buildShareUrl = useCallback(() => {
-    if (!site) return ''
+    if (!apiSite) return ''
     const origin = (import.meta.env.VITE_SONDE_SHARE_ORIGIN ?? '').trim() || window.location.origin
     const u = new URL('/site', origin)
-    u.searchParams.set('lat', String(site.lat))
-    u.searchParams.set('lng', String(site.lng))
-    u.searchParams.set('address', site.address)
-    u.searchParams.set('name', site.name)
+    u.searchParams.set('lat', String(apiSite.lat))
+    u.searchParams.set('lng', String(apiSite.lng))
+    u.searchParams.set('address', apiSite.address)
+    u.searchParams.set('name', apiSite.name)
     const z = mapRef.current?.getZoom()
     u.searchParams.set(
       'zoom',
       String(z != null && Number.isFinite(z) ? Math.round(z * 10) / 10 : 15)
     )
     return u.toString()
-  }, [site])
+  }, [apiSite])
 
   const copyShareUrl = useCallback(async () => {
     const href = buildShareUrl()
@@ -680,19 +1072,19 @@ export default function App() {
 
   const shareSiteNative = useCallback(() => {
     const href = buildShareUrl()
-    if (!href || !site) return
+    if (!href || !apiSite) return
     if (navigator.share) {
       void navigator
         .share({
           title: 'Sonde Site Analysis',
-          text: site.name,
+          text: apiSite.name,
           url: href,
         })
         .catch(() => copyShareUrl())
     } else {
       void copyShareUrl()
     }
-  }, [buildShareUrl, site, copyShareUrl])
+  }, [buildShareUrl, apiSite, copyShareUrl])
 
   useEffect(() => {
     const map = mapRef.current
@@ -733,6 +1125,11 @@ export default function App() {
   useEffect(() => {
     const map = mapRef.current
     if (!map || !site) return
+    if (site.lat === 0 && site.lng === 0) {
+      markerRef.current?.remove()
+      markerRef.current = null
+      return
+    }
     if (!markerRef.current) {
       markerRef.current = new mapboxgl.Marker({ color: '#E8621A' })
         .setLngLat([site.lng, site.lat])
@@ -741,6 +1138,32 @@ export default function App() {
       markerRef.current.setLngLat([site.lng, site.lat])
     }
   }, [mapInstance, site])
+
+  /** Valid site → fly to pin (share links may include zoom); no site → UK overview. */
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !mapLoaded) return
+    if (apiSite) {
+      const p = new URLSearchParams(window.location.search)
+      const urlZoom = Number(p.get('zoom'))
+      map.flyTo({
+        center: [apiSite.lng, apiSite.lat],
+        zoom: Number.isFinite(urlZoom) ? urlZoom : 15,
+        pitch: 0,
+        bearing: 0,
+        essential: true,
+      })
+    } else {
+      map.flyTo({
+        center: UK_CENTER,
+        zoom: UK_ZOOM,
+        pitch: 0,
+        bearing: 0,
+        essential: true,
+      })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fly when coordinates change, not whole `apiSite` object
+  }, [mapLoaded, apiSite?.lat, apiSite?.lng])
 
   useEffect(() => {
     const map = mapRef.current
@@ -953,59 +1376,87 @@ export default function App() {
     (start: SectionPoint, end: SectionPoint) => {
       const map = mapRef.current
       if (!map) return
-      console.log(`Section: A=[${start.lat}, ${start.lng}] B=[${end.lat}, ${end.lng}]`)
       const distanceM = Math.max(1, haversineM(start.lat, start.lng, end.lat, end.lng))
-      console.log(`Section: total distance = ${distanceM.toFixed(0)}m`)
-      if (!BASIC_3D_BUILDINGS_ONLY) {
-        const demSource = 'mapbox-terrain-dem-v1'
-        if (!map.getSource(demSource)) {
-          map.addSource(demSource, {
-            type: 'raster-dem',
-            url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
-            tileSize: 512,
-          })
-        }
-        map.setTerrain({ source: demSource, exaggeration: 1 })
-        console.log('Section: terrain enabled, waiting for idle...')
-      }
-      map.once('idle', () => {
-        const lngA = start.lng
-        const latA = start.lat
-        const lngB = end.lng
-        const latB = end.lat
-        const totalDistance = distanceM
-        console.log('=== SECTION DEBUG ===')
-        console.log('Terrain enabled:', map.getTerrain())
-        const testElev = map.queryTerrainElevation([site?.lng ?? lngA, site?.lat ?? latA], { exaggerated: false })
-        console.log('Test elevation at site:', testElev)
-        const samples: ElevationSample[] = []
-        for (let i = 0; i <= 20; i += 1) {
-          const t = i / 20
-          const lng = lngA + (lngB - lngA) * t
-          const lat = latA + (latB - latA) * t
-          const elev = map.queryTerrainElevation([lng, lat], { exaggerated: false })
-          console.log(`Point ${i}: [${lng.toFixed(4)}, ${lat.toFixed(4)}] elev=${elev}`)
-          samples.push({ lng, lat, distanceM: t * distanceM, elevationM: elev ?? 15 })
-        }
-        console.log('All points:', samples.map((p) => ({ distance: p.distanceM, elevation: p.elevationM })))
-        console.log('=== END DEBUG ===')
-        const dense: ElevationSample[] = []
-        for (let i = 0; i <= 60; i += 1) {
-          const t = i / 60
-          const lng = lngA + (lngB - lngA) * t
-          const lat = latA + (latB - latA) * t
-          const elev = map.queryTerrainElevation([lng, lat], { exaggerated: false })
-          dense.push({ lng, lat, distanceM: t * totalDistance, elevationM: elev ?? 18 })
-        }
-        const min = Math.min(...dense.map((s) => s.elevationM))
-        const max = Math.max(...dense.map((s) => s.elevationM))
-        console.log(`Section: sampled ${dense.length} elevation points`)
-        console.log(`Section: min=${min.toFixed(1)}m max=${max.toFixed(1)}m`)
-        setSectionProfile(dense)
+      const hasPin = site != null && (site.lat !== 0 || site.lng !== 0)
+      const targetCenter: [number, number] = hasPin
+        ? [site!.lng, site!.lat]
+        : [(start.lng + end.lng) / 2, (start.lat + end.lat) / 2]
+      map.easeTo({
+        center: targetCenter,
+        zoom: 15,
+        pitch: 0,
+        duration: 450,
       })
+
+      const lngA = start.lng
+      const latA = start.lat
+      const lngB = end.lng
+      const latB = end.lat
+      const points: Array<{ lat: number; lng: number }> = []
+      for (let i = 0; i < 60; i += 1) {
+        const t = i / 59
+        points.push({
+          lat: latA + (latB - latA) * t,
+          lng: lngA + (lngB - lngA) * t,
+        })
+      }
+
+      void (async () => {
+        try {
+          const grid = lidarDtmGridRef.current
+          let elevs: number[] | null = grid ? sectionElevationsFromLidar(grid, points) : null
+          let source: 'lidar' | 'opentopo' | 'openmeteo' | 'mapbox' = 'lidar'
+          if (!elevs) {
+            const lats = points.map((p) => p.lat)
+            const lngs = points.map((p) => p.lng)
+            const pad = 0.0012
+            const south = Math.min(...lats) - pad
+            const north = Math.max(...lats) + pad
+            const west = Math.min(...lngs) - pad
+            const east = Math.max(...lngs) + pad
+            const demGrid = await fetchDemGridForBounds(south, north, west, east)
+            if (demGrid) {
+              elevs = sectionElevationsFromLidar(demGrid, points)
+              if (elevs) source = 'opentopo'
+            }
+          }
+          if (!elevs) {
+            source = 'openmeteo'
+            try {
+              elevs = await sampleOpenMeteoElevations(points)
+            } catch {
+              elevs = points.map(() => 0)
+            }
+          }
+          const dense: ElevationSample[] = points.map((p, i) => ({
+            lng: p.lng,
+            lat: p.lat,
+            distanceM: (i / 59) * distanceM,
+            elevationM: elevs![i] ?? 0,
+          }))
+          const min = Math.min(...dense.map((s) => s.elevationM))
+          const max = Math.max(...dense.map((s) => s.elevationM))
+          console.log(`Section: ${source} · ${dense.length} pts · min ${min.toFixed(1)}m · max ${max.toFixed(1)}m`)
+          setSectionProfile(dense)
+        } catch (e) {
+          console.error('Section elevation failed', e)
+          const dense: ElevationSample[] = points.map((p, i) => ({
+            lng: p.lng,
+            lat: p.lat,
+            distanceM: (i / 59) * distanceM,
+            elevationM: 0,
+          }))
+          setSectionProfile(dense)
+        }
+      })()
     },
     [site]
   )
+
+  useEffect(() => {
+    if (!lidarDtmGrid || sectionPoints.length < 2) return
+    rebuildSectionProfile(sectionPoints[0], sectionPoints[1])
+  }, [lidarDtmGrid, sectionPoints, rebuildSectionProfile])
 
   useEffect(() => {
     const map = mapRef.current
@@ -1039,7 +1490,8 @@ export default function App() {
 
   useEffect(() => {
     if (BASIC_3D_BUILDINGS_ONLY) return
-    if (!site || osm.status !== 'ok' || !lidarHeightsEnabled) return
+    if (!site || osm.status !== 'ok' || !osm.data || !lidarHeightsEnabled) return
+    if (lidarDtmGrid && lidarDsmGrid) return
     let cancelled = false
     const buildings = osm.data.buildings
       .filter((b) => {
@@ -1118,7 +1570,7 @@ export default function App() {
             }
             localStorage.setItem(
               cacheKey,
-              JSON.stringify({ expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000, data: lidarData })
+              JSON.stringify({ expiresAt: Date.now() + LIDAR_CACHE_MS, data: lidarData })
             )
           }
         } catch {
@@ -1138,12 +1590,12 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [site, osm, lidarHeightsByKey, lidarByBuilding, lidarHeightsEnabled])
+  }, [site, osm, lidarHeightsByKey, lidarByBuilding, lidarHeightsEnabled, lidarDtmGrid, lidarDsmGrid, mapLoaded])
 
   useEffect(() => {
     if (BASIC_3D_BUILDINGS_ONLY) return
     const map = mapRef.current
-    if (!map || !mapLoaded || !site || osm.status !== 'ok') return
+    if (!map || !mapLoaded || !site || osm.status !== 'ok' || !osm.data) return
     const features: GeoJSON.Feature[] = osm.data.buildings
       .map((b) => {
         const ring = b.rings[0]
@@ -1274,7 +1726,7 @@ export default function App() {
   useEffect(() => {
     if (BASIC_3D_BUILDINGS_ONLY) return
     const map = mapRef.current
-    if (!map || !mapLoaded || !site || osm.status !== 'ok') return
+    if (!map || !mapLoaded || !site || osm.status !== 'ok' || !osm.data) return
     if (!treesEnabled) {
       if (map.getLayer(TREE_LABEL_LAYER_ID)) map.removeLayer(TREE_LABEL_LAYER_ID)
       if (map.getLayer(TREE_LAYER_ID)) map.removeLayer(TREE_LAYER_ID)
@@ -1284,7 +1736,7 @@ export default function App() {
       setTreeStatus('')
       return
     }
-    const trees = [...osm.data.trees]
+    const trees = mergeOsmAndLidarTrees([...osm.data.trees], lidarDerivedTreeExtras)
     for (const wood of osm.data.woodlands) {
       const ring = wood.ring.map(([lat, lng]) => [lng, lat] as [number, number])
       let added = 0
@@ -1307,7 +1759,12 @@ export default function App() {
     }
     const maxTrees = 200
     const shown = trees.length > maxTrees ? trees.sort(() => Math.random() - 0.5).slice(0, maxTrees) : trees
-    setTreeStatus(`Showing ${shown.length} of ${trees.length} trees`)
+    const lidarN = lidarDerivedTreeExtras.length
+    setTreeStatus(
+      lidarN
+        ? `Showing ${shown.length} of ${trees.length} trees (OSM + ${lidarN} LiDAR candidates, deduped)`
+        : `Showing ${shown.length} of ${trees.length} trees`
+    )
     setMapPipelineStatus((prev) => (prev.includes('buildings ✓') ? 'Loading: buildings ✓ · trees ✓ · shadows…' : prev))
     setMapPipelineUpdatedAt(new Date())
     const fc: GeoJSON.FeatureCollection = {
@@ -1399,7 +1856,7 @@ export default function App() {
       map.off('mousemove', TREE_LAYER_ID, onMove)
       popup.remove()
     }
-  }, [treesEnabled, mapLoaded, site, osm, is3DView])
+  }, [treesEnabled, mapLoaded, site, osm, is3DView, lidarDerivedTreeExtras])
 
   useEffect(() => {
     if (BASIC_3D_BUILDINGS_ONLY) return
@@ -1419,10 +1876,20 @@ export default function App() {
         },
       })
     }
-    map.setLayoutProperty(SHADOW_LAYER_ID, 'visibility', 'visible')
+    map.setLayoutProperty(SHADOW_LAYER_ID, 'visibility', shadowModeOn ? 'visible' : 'none')
     setMapPipelineStatus('Loading: buildings ✓ · trees ✓ · shadows ✓')
     setMapPipelineUpdatedAt(new Date())
-  }, [mapLoaded, selectedShadowDateTime, buildShadowFeatureCollection])
+  }, [mapLoaded, selectedShadowDateTime, buildShadowFeatureCollection, shadowModeOn])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !mapLoaded || !map.getLayer(SHADOW_LAYER_ID)) return
+    map.setLayoutProperty(SHADOW_LAYER_ID, 'visibility', shadowModeOn ? 'visible' : 'none')
+  }, [mapLoaded, shadowModeOn])
+
+  useEffect(() => {
+    if (!shadowModeOn) setShadowAnimating(false)
+  }, [shadowModeOn])
 
   useEffect(() => {
     if (BASIC_3D_BUILDINGS_ONLY) return
@@ -1610,16 +2077,26 @@ export default function App() {
     if (sectionPoints.length < 2) return { forward: 'East', backward: 'West', current: 'East', bearing: 90, forwardArrow: '→', backwardArrow: '←' }
     const b = bearingDeg(sectionPoints[0], sectionPoints[1])
     const c = nearestCardinalForView(b)
+    const currentDirectionLabel = sectionFlip ? c.backward : c.forward
+    const currentArrowLabel = sectionFlip ? c.backwardArrow : c.forwardArrow
     return {
       forward: c.forward,
       backward: c.backward,
-      current: sectionFlip ? c.backward : c.forward,
+      current: currentDirectionLabel || c.forward,
       bearing: sectionFlip ? (b + 180) % 360 : b,
+      forwardArrow: c.forwardArrow,
+      backwardArrow: c.backwardArrow,
+      currentArrow: currentArrowLabel || c.forwardArrow,
     }
   }, [sectionPoints, sectionFlip])
 
   const sectionBuildings = useMemo(() => {
     if (!sectionProfile || sectionProfile.length < 2 || sectionPoints.length < 2 || osm.status !== 'ok') return []
+    const linesIntersect = (
+      x1: number, y1: number, x2: number, y2: number,
+      x3: number, y3: number, x4: number, y4: number
+    ): boolean => segmentIntersectionT([x1, y1], [x2, y2], [x3, y3], [x4, y4]) != null
+    const osmBuildings = osm.data.buildings || []
     const map = mapRef.current
     const a: [number, number] = [sectionPoints[0].lng, sectionPoints[0].lat]
     const b: [number, number] = [sectionPoints[1].lng, sectionPoints[1].lat]
@@ -1664,7 +2141,28 @@ export default function App() {
       const mapboxH = c0 ? fallbackHeightFromMapbox(c0.lat, c0.lng) : null
       return lidarH ?? mapboxH ?? bld.heightM ?? (bld.levels ? bld.levels * 3 : 6)
     }
-    for (const bld of osm.data.buildings) {
+    const getIntersectingBuildings = (
+      lngA: number,
+      latA: number,
+      lngB: number,
+      latB: number,
+      buildings: typeof osmBuildings
+    ) => {
+      return buildings.filter((building) => {
+        const ring = building.rings[0]
+        if (!ring || ring.length < 3) return false
+        const coords = ring.map(([rLat, rLng]) => [rLng, rLat] as [number, number])
+        for (let i = 0; i < coords.length - 1; i += 1) {
+          const [x1, y1] = coords[i]
+          const [x2, y2] = coords[i + 1]
+          if (linesIntersect(lngA, latA, lngB, latB, x1, y1, x2, y2)) return true
+        }
+        return pointInPolygon([lngA, latA], coords) || pointInPolygon([lngB, latB], coords)
+      })
+    }
+
+    const intersectingBuildings = getIntersectingBuildings(a[0], a[1], b[0], b[1], osmBuildings)
+    for (const bld of intersectingBuildings) {
       const ring = bld.rings[0]?.map(([lat, lon]) => [lon, lat] as [number, number])
       if (!ring || ring.length < 3) continue
       const tVals: number[] = []
@@ -1681,7 +2179,7 @@ export default function App() {
         const startM = startT * distanceM
         const endM = endT * distanceM
         if (endM - startM < 1) continue
-        const h = resolvedHeight(bld)
+        const h = resolvedHeight(bld) || 8
         const centerM = (startM + endM) / 2
         const baseM = terrainAt(centerM)
         const topM = baseM + h
@@ -1708,16 +2206,33 @@ export default function App() {
         const wM = Math.max(3, Math.sqrt((ring.length - 1)) * 2)
         const startM = Math.max(0, centerM - wM / 2)
         const endM = Math.min(distanceM, centerM + wM / 2)
-        const h = resolvedHeight(bld)
+        const h = resolvedHeight(bld) || 8
         const baseM = terrainAt(centerM)
         const topM = baseM + h
         const label = bld.name ?? bld.buildingType ?? 'building'
         out.push({ startM, endM, topM, baseM, label, context: true })
       }
     }
-    console.log(`Section: found ${out.filter((bld) => !bld.context).length} buildings intersecting line`)
     return out
   }, [sectionProfile, sectionPoints, osm, lidarHeightsByKey, mapLoaded])
+
+  const toggleTrees = useCallback((show: boolean) => {
+    const map = mapRef.current
+    if (!map) return
+    if (!map.isStyleLoaded()) return
+    try {
+      if (!show) {
+        if (map.getLayer(TREE_LABEL_LAYER_ID)) map.removeLayer(TREE_LABEL_LAYER_ID)
+        if (map.getLayer(TREE_CANOPY_LAYER_ID)) map.removeLayer(TREE_CANOPY_LAYER_ID)
+        if (map.getLayer(TREE_TRUNK_LAYER_ID)) map.removeLayer(TREE_TRUNK_LAYER_ID)
+        if (map.getLayer(TREE_LAYER_ID)) map.removeLayer(TREE_LAYER_ID)
+        if (map.getSource(TREE_SOURCE_ID)) map.removeSource(TREE_SOURCE_ID)
+      }
+      setTreesEnabled(show)
+    } catch (e) {
+      console.error('Tree toggle:', e)
+    }
+  }, [])
 
   const applyShadowPreset = useCallback(
     (month: number, day: number, hour: number) => {
@@ -1921,7 +2436,16 @@ export default function App() {
       case 'ground':
         return wrapModule('Ground', <GroundModule site={site} />)
       case 'lasercut':
-        return wrapModule('Laser Cut', <LaserCutModule site={site} radiusM={radiusM} onRadius={setRadiusM} map={mapInstance} osm={osm} />)
+        return wrapModule(
+          'Laser Cut',
+          <LaserCutModule
+            site={site}
+            radiusM={radiusM}
+            onRadius={setRadiusM}
+            osm={osm}
+            lidarDtmGrid={lidarDtmGrid}
+          />
+        )
       case 'planning':
         return wrapModule('Planning', <PlanningPolicyModule site={site} state={planning} />)
       case 'demographics':
@@ -1994,10 +2518,10 @@ export default function App() {
   const [overpassSource, setOverpassSource] = useState(() => getOverpassSourceStatus())
   useEffect(() => subscribeOverpassSource(() => setOverpassSource(getOverpassSourceStatus())), [])
   const overpassLabel =
-    overpassSource.mode === 'own'
-      ? 'own server ✓'
+    overpassSource.mode === 'edge'
+      ? 'edge cache ✓'
       : overpassSource.mode === 'public'
-        ? 'public API (fallback)'
+        ? 'public API'
         : 'initialising'
   const allServicesOk = mapboxStatus === 'ok' && claudeStatus === 'ok' && osmStatus === 'ok'
   const anyServiceError = mapboxStatus === 'error' || claudeStatus === 'error' || osmStatus === 'error'
@@ -2038,24 +2562,29 @@ export default function App() {
     console.log('Section: SVG rendered 800×200px')
   }, [recordExportedFile, sectionScale, sectionDistanceM, sectionStats])
 
+  useEffect(() => {
+    const id = requestAnimationFrame(() => mapRef.current?.resize())
+    return () => cancelAnimationFrame(id)
+  }, [mapFullscreen, mapHudOpen, mapLoaded])
+
   return (
-    <div className="sonde-root">
+    <div className={mapFullscreen ? 'sonde-root sonde-root--map-fs' : 'sonde-root'}>
       <header className="sonde-topbar">
         <div className="sonde-wordmark" aria-label="Sonde">
           SONDE
         </div>
         <AddressSearch map={mapInstance} onSite={onSite} syncAddress={site?.address ?? null} />
-        <button type="button" className="sonde-btn sonde-save-btn" onClick={saveCurrentSite} disabled={!site}>
+        <button type="button" className="sonde-btn sonde-save-btn" onClick={saveCurrentSite} disabled={!apiSite}>
           <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
             <path d="M6 1.2a3.2 3.2 0 0 0-3.2 3.2c0 2.4 3.2 6.4 3.2 6.4s3.2-4 3.2-6.4A3.2 3.2 0 0 0 6 1.2Zm0 4.4a1.2 1.2 0 1 1 0-2.4 1.2 1.2 0 0 1 0 2.4Z" fill="currentColor" />
           </svg>
           Save Site
         </button>
         <div className="sonde-topbar-meta">
-          <button type="button" className="sonde-btn sonde-btn--ghost" onClick={copyShareUrl} disabled={!site}>
+          <button type="button" className="sonde-btn sonde-btn--ghost" onClick={copyShareUrl} disabled={!apiSite}>
             Copy link
           </button>
-          <button type="button" className="sonde-btn sonde-save-btn" onClick={shareSiteNative} disabled={!site}>
+          <button type="button" className="sonde-btn sonde-save-btn" onClick={shareSiteNative} disabled={!apiSite}>
             Share site
           </button>
           <button
@@ -2146,11 +2675,44 @@ export default function App() {
               role="presentation"
               style={{ width: '100%', height: '500px' }}
             />
+            {token ? (
+              <div
+                className="sonde-terrain-status-bar sonde-mono"
+                style={{
+                  fontSize: 11,
+                  lineHeight: 1.45,
+                  padding: '8px 12px',
+                  background: 'rgba(14,13,12,0.92)',
+                  color: '#c8c4bc',
+                  borderTop: '1px solid var(--sonde-edge, #333)',
+                }}
+              >
+                {terrainStatusBarText}
+              </div>
+            ) : null}
             {shadowState && site ? (
               <div className="sonde-map-overlay sonde-mono">
                 <span>{shadowState.time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                 <span>alt {shadowState.altitude.toFixed(1)}°</span>
                 <span>azi {shadowState.azimuthFromNorth.toFixed(1)}°</span>
+              </div>
+            ) : null}
+            {apiSite && token && lidarEwLabel !== 'idle' ? (
+              <div
+                className={`sonde-map-lidar-badge sonde-mono ${
+                  lidarEwLabel === 'covered'
+                    ? 'sonde-map-lidar-badge--ok'
+                    : lidarEwLabel === 'loading'
+                      ? 'sonde-map-lidar-badge--loading'
+                      : 'sonde-map-lidar-badge--warn'
+                }`}
+                role="status"
+              >
+                {lidarEwLabel === 'covered'
+                  ? 'LiDAR ✓ 1m resolution'
+                  : lidarEwLabel === 'loading'
+                    ? 'LiDAR … loading'
+                    : 'LiDAR ✗ using estimates'}
               </div>
             ) : null}
           </div>
@@ -2197,7 +2759,7 @@ export default function App() {
                 type="button"
                 className={`sonde-btn ${treesEnabled ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
                 disabled={osm.status !== 'ok'}
-                onClick={() => setTreesEnabled((v) => !v)}
+                onClick={() => toggleTrees(!treesEnabled)}
               >
                 {treesEnabled ? 'Trees ON' : 'Trees OFF'}
               </button>
@@ -2217,11 +2779,44 @@ export default function App() {
               >
                 {lidarHeightsEnabled ? 'LiDAR heights ON' : 'LiDAR heights OFF'}
               </button>
+              <button
+                type="button"
+                className={`sonde-btn ${egmsHeatmapOn ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
+                disabled={!mapInstance || !apiSite}
+                onClick={() => setEgmsHeatmapOn((v) => !v)}
+              >
+                {egmsHeatmapOn ? 'Ground movement heatmap ON' : 'Ground movement heatmap OFF'}
+              </button>
+              <button
+                type="button"
+                className={`sonde-btn ${slopeOverlayOn ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`}
+                disabled={!mapInstance || !lidarDtmGrid}
+                onClick={() => setSlopeOverlayOn((v) => !v)}
+              >
+                {slopeOverlayOn ? 'Slope analysis ON' : 'Slope analysis OFF'}
+              </button>
             </div>
             {treeStatus ? <p className="sonde-hint">{treeStatus}</p> : null}
             {lidarStatus ? <p className="sonde-hint">{lidarStatus}</p> : null}
+            {lidarProgressDetail ? (
+              <p className="sonde-hint sonde-mono">{lidarProgressDetail}</p>
+            ) : null}
             <p className="sonde-hint sonde-mono">
-              {`Buildings: ${lidarHeightsEnabled ? 'LiDAR' : 'Mapbox/OSM'} | Trees: OSM | Shadows: calculated | ${mapPipelineStatus} | Last updated: ${mapPipelineUpdatedAt ? mapPipelineUpdatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}`}
+              {`Terrain: ${
+                terrainDemSource === 'ea_1m'
+                  ? 'EA LiDAR 1m'
+                  : terrainDemSource === 'eu_25m'
+                    ? 'COP30 ~25m'
+                    : terrainDemSource === 'srtm_30m'
+                      ? 'SRTM 30m'
+                      : lidarEwLabel === 'loading'
+                        ? '… loading'
+                        : lidarEwLabel === 'error'
+                          ? '✗ fetch failed'
+                          : '—'
+              } | LiDAR tile: ${
+                lidarEwLabel === 'covered' ? '✓' : lidarEwLabel === 'loading' ? '…' : lidarEwLabel === 'error' ? '✗' : '—'
+              } | Buildings: ${lidarHeightsEnabled ? 'LiDAR tile / fallback' : 'Mapbox/OSM'} | Trees: OSM + LiDAR (deduped) | Shadows: calculated | ${mapPipelineStatus} | Last updated: ${mapPipelineUpdatedAt ? mapPipelineUpdatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}`}
             </p>
 
             <div className="sonde-map-tools-grid">
@@ -2232,7 +2827,7 @@ export default function App() {
                   min={0}
                   max={364}
                   step={1}
-                  disabled={!site}
+                  disabled={!apiSite}
                   value={shadowDayIndex}
                   onChange={(e) => setShadowDayIndex(Number(e.target.value))}
                 />
@@ -2247,7 +2842,7 @@ export default function App() {
                   min={0}
                   max={1000}
                   step={1}
-                  disabled={!site}
+                  disabled={!apiSite}
                   value={shadowDayProgress}
                   onChange={(e) => setShadowDayProgress(Number(e.target.value))}
                 />
@@ -2264,34 +2859,34 @@ export default function App() {
             </p>
 
             <div className="sonde-preset-row">
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(6, 21, 9)} disabled={!site}>
+              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(6, 21, 9)} disabled={!apiSite}>
                 Summer 09:00
               </button>
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(6, 21, 12)} disabled={!site}>
+              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(6, 21, 12)} disabled={!apiSite}>
                 Summer 12:00
               </button>
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(6, 21, 15)} disabled={!site}>
+              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(6, 21, 15)} disabled={!apiSite}>
                 Summer 15:00
               </button>
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(12, 21, 9)} disabled={!site}>
+              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(12, 21, 9)} disabled={!apiSite}>
                 Winter 09:00
               </button>
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(12, 21, 12)} disabled={!site}>
+              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(12, 21, 12)} disabled={!apiSite}>
                 Winter 12:00
               </button>
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(12, 21, 15)} disabled={!site}>
+              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(12, 21, 15)} disabled={!apiSite}>
                 Winter 15:00
               </button>
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(3, 21, 12)} disabled={!site}>
+              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(3, 21, 12)} disabled={!apiSite}>
                 Spring 12:00
               </button>
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(9, 21, 12)} disabled={!site}>
+              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => applyShadowPreset(9, 21, 12)} disabled={!apiSite}>
                 Autumn 12:00
               </button>
-              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={applyShadowNow} disabled={!site}>
+              <button type="button" className="sonde-btn sonde-btn--ghost" onClick={applyShadowNow} disabled={!apiSite}>
                 Now
               </button>
-              <button type="button" className={`sonde-btn ${shadowAnimating ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`} onClick={() => setShadowAnimating(true)} disabled={!site || shadowAnimating}>
+              <button type="button" className={`sonde-btn ${shadowAnimating ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`} onClick={() => setShadowAnimating(true)} disabled={!apiSite || shadowAnimating}>
                 ▶ Play
               </button>
               <button type="button" className="sonde-btn sonde-btn--ghost" onClick={() => setShadowAnimating(false)} disabled={!shadowAnimating}>
@@ -2460,7 +3055,7 @@ export default function App() {
                       <rect x="0" y="0" width="3" height="3" fill="var(--section-ground-fill)" />
                     </pattern>
                     <clipPath id="sonde-section-clip">
-                      <rect x="52" y="12" width="752" height="240" />
+                      <rect x="52" y="12" width="752" height="236" />
                     </clipPath>
                   </defs>
                   {(() => {
@@ -2469,7 +3064,7 @@ export default function App() {
                     const left = 52
                     const right = 16
                     const top = 12
-                    const bottom = 48
+                    const bottom = 52
                     const width = svgWidth - left - right
                     const height = svgHeight - top - bottom
                     const maxD = sectionProfile[sectionProfile.length - 1].distanceM
@@ -2481,7 +3076,7 @@ export default function App() {
                     const yMinWorld = minElev
                     const yMaxWorld = maxElev
                     const spanE = Math.max(1, maxElev - minElev)
-                    const xStep = 10
+                    const xStep = 20
                     const xTicks = Math.floor(maxD / xStep)
                     const yStep = niceTickStep(spanE, 5)
                     const yStart = Math.floor(yMinWorld / yStep) * yStep
@@ -2531,26 +3126,7 @@ export default function App() {
                       }
                       return workingProfile[0].elevationM
                     }
-                    const trunc = (s: string) => (s.length > 20 ? `${s.slice(0, 17)}...` : s)
-                    const sectionColours = {
-                      background: '#111111',
-                      text: '#ffffff',
-                      terrainStroke: '#ffffff',
-                      terrainStrokeWidth: 2,
-                      groundFill: '#2a2a2a',
-                      buildingFill: '#555555',
-                      buildingStroke: '#ffffff',
-                      buildingStrokeWidth: 0.5,
-                      abDot: '#E8621A',
-                    }
-                    console.log('Section colours:', sectionColours)
-                    console.log('=== SVG RENDER ===')
-                    console.log('points count:', points.length)
-                    console.log('buildings count:', sectionBuildings.length)
-                    console.log('svgWidth:', svgWidth)
-                    console.log('svgHeight:', svgHeight)
-                    console.log('first point:', points[0])
-                    console.log('last point:', points[points.length - 1])
+                    const trunc = (s: string) => (s.length > 12 ? `${s.slice(0, 12)}...` : s)
                     return (
                       <>
                         <rect x={left} y={top} width={width} height={height} fill="none" stroke="var(--section-axis)" strokeWidth="0.9" />
@@ -2582,10 +3158,14 @@ export default function App() {
                         {sectionBuildings.map((bld, i) => {
                           const x1 = sectionFlip ? distToX(maxD - bld.endM) : distToX(bld.startM)
                           const x2 = sectionFlip ? distToX(maxD - bld.startM) : distToX(bld.endM)
+                          const widthPx = Math.max(1, Math.abs(x2 - x1))
                           const yTop = elevToY(bld.topM)
                           const dMid = (bld.startM + bld.endM) / 2
                           const yBase = elevToY(terrainAtDist(dMid))
-                          const yLabel = i % 2 === 0 ? yTop - 3 : yBase + 10
+                          const prevMid = i > 0 ? (sectionBuildings[i - 1].startM + sectionBuildings[i - 1].endM) / 2 : Number.NaN
+                          const closeToPrev = Number.isFinite(prevMid) && Math.abs(dMid - prevMid) < 12
+                          const alternate = closeToPrev ? i % 2 !== 0 : i % 2 === 0
+                          const yLabel = alternate ? yTop - 3 : yBase + 10
                           return (
                             <g key={`bld-cut-${i}`}>
                               {bld.context ? (
@@ -2597,15 +3177,17 @@ export default function App() {
                                   <rect
                                     x={Math.min(x1, x2)}
                                     y={yTop}
-                                    width={Math.max(1, Math.abs(x2 - x1))}
+                                    width={widthPx}
                                     height={Math.max(1, yBase - yTop)}
-                                    fill="var(--section-building-fill)"
-                                    stroke="var(--section-building-stroke)"
-                                    strokeWidth="var(--section-building-stroke-width)"
+                                    fill="#888888"
+                                    stroke="#ffffff"
+                                    strokeWidth="0.5"
                                   />
-                                  <text x={(x1 + x2) / 2} y={Math.max(top + 8, Math.min(top + height - 6, yLabel))} textAnchor="middle" fill="#ffffff" fontSize="9" className="sonde-svg-text">
-                                    {trunc(bld.label)}
-                                  </text>
+                                  {widthPx > 40 ? (
+                                    <text x={(x1 + x2) / 2} y={Math.max(top + 8, Math.min(top + height - 6, yLabel))} textAnchor="middle" fill="#ffffff" fontSize="9" className="sonde-svg-text">
+                                      {trunc(bld.label)}
+                                    </text>
+                                  ) : null}
                                 </>
                               )}
                             </g>
@@ -2621,23 +3203,50 @@ export default function App() {
                         <text x={polyPts[polyPts.length - 1].x + 6} y={polyPts[polyPts.length - 1].y - 6} fill="#E8621A" fontSize="10" className="sonde-svg-text">
                           B
                         </text>
-                        <text x={left + width / 2} y={296} textAnchor="middle" fill="#ffffff" fontSize="8.5" className="sonde-svg-text">
-                          Distance (m, 10 m markers)
+                        <g aria-label="North arrow and scale bar">
+                          {(() => {
+                            const northX = svgWidth - 36
+                            const northTipY = 14
+                            const scaleY = 38
+                            const barRight = northX + 4
+                            const barLeft = barRight - 72
+                            return (
+                              <>
+                                <polygon
+                                  points={`${northX},${northTipY} ${northX - 5},${northTipY + 10} ${northX + 5},${northTipY + 10}`}
+                                  fill="var(--section-axis)"
+                                />
+                                <text x={northX} y={northTipY + 22} textAnchor="middle" fill="#ffffff" fontSize="8" className="sonde-svg-text">
+                                  N
+                                </text>
+                                <line x1={barLeft} y1={scaleY} x2={barRight} y2={scaleY} stroke="var(--section-axis)" strokeWidth="1.1" />
+                                <line x1={barLeft} y1={scaleY - 3} x2={barLeft} y2={scaleY + 3} stroke="var(--section-axis)" strokeWidth="1" />
+                                <line x1={(barLeft + barRight) / 2} y1={scaleY - 3} x2={(barLeft + barRight) / 2} y2={scaleY + 3} stroke="var(--section-axis)" strokeWidth="1" />
+                                <line x1={barRight} y1={scaleY - 3} x2={barRight} y2={scaleY + 3} stroke="var(--section-axis)" strokeWidth="1" />
+                                <text x={barLeft} y={scaleY - 5} textAnchor="middle" fill="#ffffff" fontSize="7" className="sonde-svg-text">
+                                  0
+                                </text>
+                                <text x={(barLeft + barRight) / 2} y={scaleY - 5} textAnchor="middle" fill="#ffffff" fontSize="7" className="sonde-svg-text">
+                                  50m
+                                </text>
+                                <text x={barRight} y={scaleY - 5} textAnchor="middle" fill="#ffffff" fontSize="7" className="sonde-svg-text">
+                                  100m
+                                </text>
+                              </>
+                            )
+                          })()}
+                        </g>
+                        <text x={10} y={svgHeight - 8} textAnchor="start" fill="#ffffff" fontSize="8" className="sonde-svg-text">
+                          {(() => {
+                            const addressLabel = site?.address?.trim() || 'Site location'
+                            return apiSite ? `${addressLabel} · ${new Date().toISOString().slice(0, 10)}` : 'Pick a site for address'
+                          })()}
                         </text>
-                        <line x1={left + 10} y1={286} x2={left + 70} y2={286} stroke="var(--section-axis)" strokeWidth="1.2" />
-                        <line x1={left + 10} y1={283} x2={left + 10} y2={289} stroke="var(--section-axis)" strokeWidth="1" />
-                        <line x1={left + 70} y1={283} x2={left + 70} y2={289} stroke="var(--section-axis)" strokeWidth="1" />
-                        <text x={left + 40} y={282} textAnchor="middle" fill="#ffffff" fontSize="7.5" className="sonde-svg-text">
-                          Scale bar
+                        <text x={left + width / 2} y={svgHeight - 8} textAnchor="middle" fill="#ffffff" fontSize="8.5" className="sonde-svg-text">
+                          {`${maxD.toFixed(1)} m`}
                         </text>
-                        <line x1={left + width - 34} y1={276} x2={left + width - 34} y2={260} stroke="var(--section-axis)" strokeWidth="1" />
-                        <polygon points={`${left + width - 34},256 ${left + width - 38},262 ${left + width - 30},262`} fill="var(--section-axis)" />
-                        <text x={left + width - 24} y={267} fill="#ffffff" fontSize="8" className="sonde-svg-text">N</text>
-                        <text x={left + 2} y={290} textAnchor="start" fill="#ffffff" fontSize="8" className="sonde-svg-text">
-                          {site ? `${site.address} · ${new Date().toISOString().slice(0, 10)}` : ''}
-                        </text>
-                        <text x={left + width - 2} y={290} textAnchor="end" fill="#ffffff" fontSize="8" className="sonde-svg-text">
-                          {`Section looking ${sectionView.current} · datum ${yMinWorld.toFixed(1)}m`}
+                        <text x={svgWidth - 10} y={svgHeight - 8} textAnchor="end" fill="#ffffff" fontSize="8" className="sonde-svg-text">
+                          {`Section looking ${sectionView.current} · datum ${yMinWorld.toFixed(1)}m · ${sectionScale}`}
                         </text>
                         <text
                           x={14}
@@ -2654,17 +3263,12 @@ export default function App() {
                     )
                   })()}
                 </svg>
-                <div className="sonde-section-meta sonde-mono">
-                  <span>Total {sectionDistanceM.toFixed(1)} m</span>
-                  <span>Min {sectionStats?.min.toFixed(1)} m</span>
-                  <span>Max {sectionStats?.max.toFixed(1)} m</span>
-                </div>
                 <div className="sonde-map-tools-row" style={{ padding: '0 0.55rem 0.55rem' }}>
                   <button type="button" className={`sonde-btn ${sectionFlip ? 'sonde-btn--ghost' : 'sonde-btn--primary'}`} onClick={() => setSectionFlip(false)}>
-                    {`Looking ${sectionView.backward} ${sectionView.backwardArrow}`}
+                    {`Looking ${sectionView.backward || 'Southwest'} ${sectionView.backwardArrow || '↙'}`}
                   </button>
                   <button type="button" className={`sonde-btn ${sectionFlip ? 'sonde-btn--primary' : 'sonde-btn--ghost'}`} onClick={() => setSectionFlip(true)}>
-                    {`Looking ${sectionView.forward} ${sectionView.forwardArrow}`}
+                    {`Looking ${sectionView.forward || 'Northeast'} ${sectionView.forwardArrow || '↗'}`}
                   </button>
                 </div>
               </div>
@@ -2683,7 +3287,9 @@ export default function App() {
       <div className="sonde-service-indicator sonde-mono" aria-live="polite">
         <span className={`sonde-status-dot sonde-status-dot--${serviceTone}`} />
         <span>
-          {`Mapbox ${serviceMark(mapboxStatus)} · Claude ${serviceMark(claudeStatus)} · OSM ${serviceMark(osmStatus)} (${overpassLabel})`}
+          {`Mapbox ${serviceMark(mapboxStatus)} · Claude ${serviceMark(claudeStatus)} · OSM ${serviceMark(osmStatus)} (${overpassLabel}) · LiDAR ${
+            lidarEwLabel === 'covered' ? '✓' : lidarEwLabel === 'outside' ? '✗' : lidarEwLabel === 'loading' ? '…' : lidarEwLabel === 'error' ? '!' : '—'
+          }`}
         </span>
       </div>
     </div>

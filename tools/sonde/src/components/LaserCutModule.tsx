@@ -1,8 +1,9 @@
 ﻿import DxfWriter from 'dxf-writer'
-import { useMemo, useState } from 'react'
-import type { Map } from 'mapbox-gl'
+import { useEffect, useMemo, useState } from 'react'
 import type { OSMPlanData, SiteLocation } from '../types'
 import { lngLatToLocalM, offsetLatMeters, offsetLngMeters } from '../utils/geoHelpers'
+import type { LidarElevationGrid } from '../utils/lidarTerrain'
+import { contoursLocalMFromGrid, sampleOpenMeteoElevations } from '../utils/lidarTerrain'
 
 type ScalePreset = '1:200' | '1:500' | '1:1000' | 'custom'
 type ContourInterval = 0.25 | 0.5 | 1
@@ -62,21 +63,19 @@ function stitchSegments(segs: Array<[Pt, Pt]>, tol: number): Pt[][] {
   return out.filter((l) => l.length > 1)
 }
 
-function buildContours(site: SiteLocation, map: Map, radiusM: number, interval: ContourInterval): Array<{ level: number; lines: Pt[][] }> {
-  const half = radiusM
-  const step = Math.max(3, Math.min(8, radiusM / 20))
-  const n = Math.floor((2 * half) / step) + 1
-  const xs = Array.from({ length: n }, (_, i) => -half + i * step)
-  const ys = Array.from({ length: n }, (_, i) => -half + i * step)
-  const elev: number[][] = ys.map(() => xs.map(() => Number.NaN))
+function contoursFromElevationGrid(
+  xs: number[],
+  ys: number[],
+  elev: number[][],
+  interval: ContourInterval,
+  step: number
+): Array<{ level: number; lines: Pt[][] }> {
   let minZ = Number.POSITIVE_INFINITY
   let maxZ = Number.NEGATIVE_INFINITY
   for (let yi = 0; yi < ys.length; yi += 1) {
     for (let xi = 0; xi < xs.length; xi += 1) {
-      const ll = localToLngLat(site, xs[xi], ys[yi])
-      const z = map.queryTerrainElevation([ll.lng, ll.lat], { exaggerated: false })
+      const z = elev[yi]?.[xi]
       if (!Number.isFinite(z)) continue
-      elev[yi][xi] = z as number
       minZ = Math.min(minZ, z as number)
       maxZ = Math.max(maxZ, z as number)
     }
@@ -100,6 +99,41 @@ function buildContours(site: SiteLocation, map: Map, radiusM: number, interval: 
     if (lines.length) out.push({ level: Number(level.toFixed(2)), lines })
   }
   return out
+}
+
+async function buildContoursOpenMeteo(
+  site: SiteLocation,
+  radiusM: number,
+  interval: ContourInterval
+): Promise<Array<{ level: number; lines: Pt[][] }>> {
+  const half = radiusM
+  const step = Math.max(3, Math.min(8, radiusM / 20))
+  const n = Math.floor((2 * half) / step) + 1
+  const xs = Array.from({ length: n }, (_, i) => -half + i * step)
+  const ys = Array.from({ length: n }, (_, i) => -half + i * step)
+  const points: Array<{ lat: number; lng: number }> = []
+  for (let yi = 0; yi < ys.length; yi += 1) {
+    for (let xi = 0; xi < xs.length; xi += 1) {
+      points.push(localToLngLat(site, xs[xi], ys[yi]))
+    }
+  }
+  let flat: number[]
+  try {
+    flat = await sampleOpenMeteoElevations(points)
+  } catch {
+    return []
+  }
+  if (flat.length !== points.length) return []
+  const elev: number[][] = []
+  let k = 0
+  for (let yi = 0; yi < ys.length; yi += 1) {
+    const row: number[] = []
+    for (let xi = 0; xi < xs.length; xi += 1) {
+      row.push(flat[k++]!)
+    }
+    elev.push(row)
+  }
+  return contoursFromElevationGrid(xs, ys, elev, interval, step)
 }
 
 function buildingPolys(site: SiteLocation, osm: OSMPlanData, radiusM: number): Pt[][] {
@@ -155,25 +189,52 @@ export function LaserCutModule({
   site,
   radiusM,
   onRadius,
-  map,
   osm,
+  lidarDtmGrid,
 }: {
   site: SiteLocation | null
   radiusM: number
   onRadius: (m: number) => void
-  map: Map | null
   osm: { status: string; data?: OSMPlanData; message?: string }
+  /** When set (England/Wales LiDAR tile), terrain contours use 1 m DTM instead of Open-Meteo. */
+  lidarDtmGrid?: LidarElevationGrid | null
 }) {
   const [scalePreset, setScalePreset] = useState<ScalePreset>('1:500')
   const [customScale, setCustomScale] = useState(500)
   const [contourInterval, setContourInterval] = useState<ContourInterval>(0.5)
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState('')
-  if (!site) return <div className="sonde-panel sonde-panel--empty"><p>Pin a site to generate DXF geometry.</p></div>
-  if (osm.status !== 'ok') return <div className="sonde-panel sonde-panel--loading"><p>Waiting for OSM buildings…</p></div>
+  const [demContours, setDemContours] = useState<Array<{ level: number; lines: Pt[][] }>>([])
   const scale = parseScale(scalePreset, customScale)
-  const buildings = useMemo(() => buildingPolys(site, osm.data!, radiusM), [site, osm.data, radiusM])
-  const contours = useMemo(() => (map ? buildContours(site, map, radiusM, contourInterval) : []), [site, map, radiusM, contourInterval])
+  const buildings = useMemo(() => {
+    if (!site || osm.status !== 'ok' || !osm.data) return [] as Pt[][]
+    return buildingPolys(site, osm.data, radiusM)
+  }, [site, osm.status, osm.data, radiusM])
+  const lidarContours = useMemo(() => {
+    if (!site || !lidarDtmGrid) return [] as Array<{ level: number; lines: Pt[][] }>
+    return contoursLocalMFromGrid(site.lat, site.lng, lidarDtmGrid, radiusM, contourInterval)
+  }, [site, lidarDtmGrid, radiusM, contourInterval])
+
+  useEffect(() => {
+    if (!site || (site.lat === 0 && site.lng === 0)) {
+      setDemContours([])
+      return
+    }
+    if (lidarContours.length > 0) {
+      setDemContours([])
+      return
+    }
+    let cancelled = false
+    void (async () => {
+      const next = await buildContoursOpenMeteo(site, radiusM, contourInterval)
+      if (!cancelled) setDemContours(next)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [site, radiusM, contourInterval, lidarContours.length])
+
+  const contours = lidarContours.length > 0 ? lidarContours : demContours
   const contourLineCount = useMemo(
     () => contours.reduce((acc, c) => acc + c.lines.length, 0),
     [contours]
@@ -204,6 +265,9 @@ export function LaserCutModule({
     return { size: fit, contourPaths, buildingPaths }
   }, [buildings, contours])
 
+  if (!site) return <div className="sonde-panel sonde-panel--empty"><p>Pin a site to generate DXF geometry.</p></div>
+  if (osm.status !== 'ok') return <div className="sonde-panel sonde-panel--loading"><p>Waiting for OSM buildings…</p></div>
+
   const applyLidlPreset = () => {
     setScalePreset('1:500')
     setCustomScale(500)
@@ -211,6 +275,7 @@ export function LaserCutModule({
     onRadius(100)
     setNote('Preset applied: Lidl Maindy Road 1:500, radius 100m, contour 0.5m.')
   }
+
   const onExport = async () => {
     setBusy(true); setNote('')
     try {
@@ -295,11 +360,15 @@ export function LaserCutModule({
         <p className="sonde-hint">Preview appears once terrain and building geometry are available.</p>
       )}
       <div className="sonde-map-tools-row" style={{ marginTop: 10 }}>
-        <button type="button" className="sonde-btn sonde-btn--primary" onClick={onExport} disabled={busy || !map}>
+        <button
+          type="button"
+          className="sonde-btn sonde-btn--primary"
+          onClick={onExport}
+          disabled={busy || (buildings.length === 0 && contourLineCount === 0)}
+        >
           {busy ? 'Exporting DXF…' : 'Download DXF (Terrain + Buildings)'}
         </button>
       </div>
-      {!map ? <p className="sonde-hint">Map not ready yet: contour extraction needs terrain tiles.</p> : null}
       {note ? <p className="sonde-hint">{note}</p> : null}
     </div>
   )
